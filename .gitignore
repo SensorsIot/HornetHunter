@@ -1,0 +1,8 @@
+# Ignore credentials files in any directory
+**/credentials.h
+credentials.h
+
+# Ignore Claude Code related files and directories
+agents.md
+claude.md
+.claude/
