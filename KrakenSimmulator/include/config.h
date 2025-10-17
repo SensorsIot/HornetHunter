@@ -1,7 +1,5 @@
 #pragma once
-// ======== Wi-Fi ========
-#define WIFI_SSID            "YOUR_WIFI_SSID"
-#define WIFI_PASS            "YOUR_WIFI_PASSWORD"
+#include "credentials.h"
 
 // ======== HTTP Servers (one port per fake Kraken) ========
 #define HTTP_PORT_A          8081
