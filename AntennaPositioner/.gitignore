@@ -1,0 +1,7 @@
+# Documentation artifacts
+/agents.md
+/claude.md
+/.claude/
+
+# Local credentials
+/credentials.h
