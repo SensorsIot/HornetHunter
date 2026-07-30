@@ -1140,7 +1140,8 @@ recovery, independent of `wlan0`.
   directly reachable from the development network, its only route outward being NAT
   through the Management Pi's `eth0`.
 - **NFR-17.9** [Must] Every station shall be reachable from the Management Pi by SSH
-  over the field WLAN, authenticated by a dedicated fleet key (§18).
+  over the field WLAN, authenticated by a dedicated fleet key (see *Fleet SSH
+  access* below).
 - **NFR-17.10** [Must] Each station shall retain a wired `eth0` recovery path,
   independent of `wlan0` and of the Management Pi.
 
@@ -1207,6 +1208,36 @@ The station receives its fixed `192.168.50.x` lease and a default route via
 the Management Pi reaches the station by SSH over it (NFR-17.9). The wired `eth0`
 carries no default route — it is a recovery / bench path only (§2.2, NFR-17.10), so
 the station's operational traffic always rides the isolated field WLAN.
+
+**Fleet SSH access.** Because the field subnet is not routed to the development
+network, a development host reaches a station only by hopping through the Management
+Pi: `dev host → pi@<management-eth0> → ssh kraken-0N`. The Management Pi holds a
+dedicated, passphrase-less fleet key `~/.ssh/hornethunter_fleet` whose public key is
+authorized for user `krakenrf` on every station, and an `~/.ssh/config` that maps
+each station name to its fixed field address:
+
+```text
+# ~/.ssh/config on the Management Pi
+Host kraken*
+    User krakenrf
+    IdentityFile ~/.ssh/hornethunter_fleet
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+
+Host kraken-01 kraken1
+    HostName 192.168.50.101
+#Host kraken-02 kraken2
+#    HostName 192.168.50.102
+```
+
+So `ssh kraken-01` from the Management Pi lands on the station over the field WLAN.
+The Management Pi's own address is a DHCP lease on the development LAN (currently
+`192.168.0.27`). Adding a station: assign its fixed lease (the `dhcp-host` drop-in
+above), append a matching `Host kraken-0N` block with its `192.168.50.x`, and
+install the fleet public key on the station —
+`ssh-copy-id -i ~/.ssh/hornethunter_fleet.pub krakenrf@<station>`. The fleet private
+key lives only on the Management Pi and must be regenerated and re-copied after the
+Management Pi is re-imaged (its `~/.ssh` does not survive a fresh flash).
 
 ---
 
