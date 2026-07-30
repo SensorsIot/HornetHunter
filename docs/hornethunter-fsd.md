@@ -111,20 +111,26 @@ Stations never initiate, and are mutually deaf by construction (§18.2).
 
 | Node | Hardware | Attached |
 |------|----------|----------|
-| Management Pi | Raspberry Pi (`HornetManager`) | LoRa DTU (USB), `eth0` uplink, `wlan0` access point |
-| Kraken Pi × 2 | Raspberry Pi | KrakenSDR (USB), LoRa DTU (USB), u-blox GNSS (USB), `wlan0`, `eth0` (wired management) |
+| Management Pi | Raspberry Pi (`HornetManager`) | LoRa DTU (USB), `wlan0` access point (field subnet), `eth0` development uplink / NAT gateway |
+| Kraken Pi × 2 | Raspberry Pi | KrakenSDR (USB), LoRa DTU (USB), u-blox GNSS (USB), `wlan0` (field client), `eth0` (emergency recovery) |
 
 Both carriers may be physically up at once. The LoRa DTUs are USB dongles
 presenting a serial port; on the development bench they are reached over the
 Universal Embedded Workbench as RFC2217 network serial ports, and on a Pi as a
 local device node. The software treats both identically (§16).
 
-**WLAN topology.** The Management Pi runs a `wlan0` access point on the
-`192.168.50.0/24` subnet with its `eth0` as the uplink; the reproducible AP
-configuration is §17.4. Stations associate to that access point when co-located,
-receiving a `192.168.50.x` lease; this is the WLAN carrier. When stations are not
-associated, the LoRa carrier is used. Each station also exposes a wired `eth0`
-management path independent of `wlan0`.
+**Network topology.** The HornetHunter network is self-contained and isolated from
+any home or site network. The Management Pi runs a `wlan0` access point on the
+`192.168.50.0/24` field subnet (address `192.168.50.1`); every Kraken Pi associates
+to it as a WLAN client and receives a fixed `192.168.50.x` lease. This field subnet
+is the operational network: the Management Pi reaches every station over it by SSH,
+and it carries the WLAN transport (§6) when a station is associated — otherwise the
+LoRa carrier is used. The Management Pi's `eth0` is the **sole** connection to an
+outside (home/development) network and exists only for development access; the
+Management Pi NATs the field subnet out through it, so stations reach the outside
+solely through the Management Pi and are never exposed on, or reachable from, the
+outside network. Each Kraken Pi also keeps a wired `eth0`, held in reserve for
+emergency recovery only. The reproducible configuration is §17.4.
 
 **DTU device node.** The LoRa DTU is addressed by its `/dev/serial/by-id/` path
 (`usb-1a86_USB_Single_Serial_<serial>-if00`), not a `ttyACM` index. The u-blox GNSS
@@ -1105,53 +1111,102 @@ configure units, paths and dependencies.
 | Disk full | Rotation bounds log growth (§20.4); logging degrades before operation does |
 | Clock jumps (no NTP) | Tolerated: v1 uses no absolute cross-node time (§9.5). Log timestamps record monotonic time alongside wall-clock |
 
-### 17.4 Access-point configuration
+### 17.4 Field network — isolated access point
 
-The Management Pi provides the field WLAN as a NetworkManager access point on
-`wlan0`, with `eth0` as the uplink. NetworkManager supplies both the access point
-(its hostapd backend) and DHCP/DNS (its internal dnsmasq) via `ipv4.method shared`;
-no `hostapd` or `dnsmasq` packages are installed. Verified platform: Debian 13
-(trixie), NetworkManager 1.52.
+The Management Pi is the field network's access point **and** its only gateway to
+the outside. It runs a NetworkManager AP-mode connection on `wlan0` for the
+`192.168.50.0/24` field subnet; NetworkManager supplies the access point (its
+hostapd backend) and DHCP/DNS (its internal dnsmasq) via `ipv4.method shared`, and
+`shared` also enables NAT masquerading from the field subnet out the default route
+(`eth0`). No `hostapd` or `dnsmasq` packages are installed. NetworkManager is the
+authoritative store: connections created with `nmcli` are mirrored automatically
+into `/etc/netplan/90-NM-*.yaml`, so the `nmcli` commands below are the source of
+truth. Verified platform: Debian 13 (trixie), NetworkManager 1.52.
+
+The field subnet is isolated. Stations live on `192.168.50.0/24` only; they are not
+bridged to the development network and, behind the Management Pi's NAT, cannot be
+reached from it. `eth0` on the Management Pi is the sole outside connection and is
+for development access only. Each station keeps its wired `eth0` for emergency
+recovery, independent of `wlan0`.
 
 - **NFR-17.5** [Must] The Management Pi shall run a NetworkManager AP-mode
   connection on `wlan0` with `ipv4.method shared`, autostarting at boot.
 - **NFR-17.6** [Must] Each station shall associate to that SSID via a
-  NetworkManager client connection, autostarting at boot.
-- **NFR-17.7** [Must] The access-point subnet shall not overlap any uplink subnet.
+  NetworkManager client connection, autostarting at boot, and receive a fixed
+  `192.168.50.x` lease keyed by its `wlan0` MAC (§18).
+- **NFR-17.7** [Must] The field subnet `192.168.50.0/24` shall not overlap the
+  development uplink subnet.
+- **NFR-17.8** [Must] The field subnet shall be isolated: a station shall not be
+  directly reachable from the development network, its only route outward being NAT
+  through the Management Pi's `eth0`.
+- **NFR-17.9** [Must] Every station shall be reachable from the Management Pi by SSH
+  over the field WLAN, authenticated by a dedicated fleet key (§18).
+- **NFR-17.10** [Must] Each station shall retain a wired `eth0` recovery path,
+  independent of `wlan0` and of the Management Pi.
 
 | Parameter | Value |
 |-----------|-------|
-| interface | `wlan0` access point, `eth0` uplink |
-| mechanism | NetworkManager connection, `802-11-wireless.mode ap`, `ipv4.method shared` |
+| interface | `wlan0` access point; `eth0` development uplink / NAT gateway |
+| mechanism | NetworkManager connection, `802-11-wireless.mode ap`, `ipv4.method shared` (DHCP + NAT) |
 | AP address / subnet | `192.168.50.1/24` |
-| station leases | NetworkManager shared DHCP, `192.168.50.0/24` |
+| station leases | NetworkManager shared DHCP over `192.168.50.0/24`; fixed per station |
+| station addresses | `kraken-01` → `192.168.50.101`, `kraken-02` → `192.168.50.102` |
 | band | 2.4 GHz (`bg`) |
 | channel | operator-chosen (NetworkManager auto by default) |
-| SSID / passphrase | operator-set, WPA2-PSK (`wpa-psk`) |
+| SSID / passphrase | `HornetAP`, WPA2-PSK (`wpa-psk`), operator-set |
+| management access | SSH from the Management Pi over `wlan0`, fleet key `~/.ssh/hornethunter_fleet` (station user `krakenrf`) |
+| regulatory domain | `CH` on both nodes (`raspi-config nonint do_wifi_country CH`) — required for the AP to select a channel |
+| AP channel | pinned to `6` (2.4 GHz, universally associable; NetworkManager otherwise auto-selects 13) |
 
-**Reproducible setup — Management Pi (access point):**
+**Reproducible setup — Management Pi (access point + NAT gateway):**
 
 ```bash
-nmcli con add type wifi ifname wlan0 con-name hh-ap ssid "<SSID>" autoconnect yes
+sudo raspi-config nonint do_wifi_country CH   # regulatory domain; unblocks Wi-Fi
+sudo rfkill unblock wlan
+nmcli con add type wifi ifname wlan0 con-name hh-ap ssid "HornetAP" autoconnect yes
 nmcli con modify hh-ap \
-  802-11-wireless.mode ap 802-11-wireless.band bg \
+  802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 6 \
   wifi-sec.key-mgmt wpa-psk wifi-sec.psk "<passphrase>" \
   ipv4.method shared ipv4.addresses 192.168.50.1/24 \
   connection.autoconnect-priority 100
 nmcli con up hh-ap
 ```
 
+The channel is pinned to `6`; left on auto, NetworkManager may pick channel 13,
+which many clients will not associate with.
+
+`ipv4.method shared` starts NetworkManager's dnsmasq (DHCP + DNS on the subnet) and
+installs the NAT masquerade rule out the default route — no separate router config.
+Fixed station leases are pinned with a dnsmasq drop-in read by NetworkManager's
+instance:
+
+```bash
+# /etc/NetworkManager/dnsmasq-shared.d/hornethunter-leases.conf
+dhcp-host=<kraken-01-wlan0-mac>,192.168.50.101,kraken-01
+dhcp-host=<kraken-02-wlan0-mac>,192.168.50.102,kraken-02
+```
+
 **Reproducible setup — each station (associate to the access point):**
 
 ```bash
-nmcli con add type wifi ifname wlan0 con-name hh-field ssid "<SSID>" autoconnect yes
-nmcli con modify hh-field wifi-sec.key-mgmt wpa-psk wifi-sec.psk "<passphrase>"
+sudo raspi-config nonint do_wifi_country CH
+nmcli con add type wifi ifname wlan0 con-name hh-field ssid "HornetAP" autoconnect yes
+nmcli con modify hh-field wifi-sec.key-mgmt wpa-psk wifi-sec.psk "<passphrase>" \
+  connection.autoconnect-priority 100
+# Field isolation: HornetAP is the only Wi-Fi the station will auto-join, and the
+# wired eth0 never carries the default route (recovery / bench UI access only).
+nmcli -t -f UUID,TYPE,AUTOCONNECT,NAME con show | \
+  awk -F: '$2=="802-11-wireless" && $3=="yes" && $4!="hh-field"{print $1}' | \
+  xargs -rn1 -I{} nmcli con modify {} connection.autoconnect no
+nmcli con modify "Wired connection 1" ipv4.never-default yes ipv4.route-metric 700
 nmcli con up hh-field
 ```
 
-Stations then receive a `192.168.50.x` lease, which the WLAN carrier (§6, §15.2)
-uses when associated. The wired `eth0` path (§2.2) remains available regardless of
-`wlan0` state.
+The station receives its fixed `192.168.50.x` lease and a default route via
+`192.168.50.1`; the WLAN carrier (§6, §15.2) uses this address when associated, and
+the Management Pi reaches the station by SSH over it (NFR-17.9). The wired `eth0`
+carries no default route — it is a recovery / bench path only (§2.2, NFR-17.10), so
+the station's operational traffic always rides the isolated field WLAN.
 
 ---
 
