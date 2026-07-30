@@ -1,39 +1,79 @@
-# HornetHunter
+# 🐝 HornetHunter
 
-Radio direction finding (RDF) tools for tracking invasive hornets.
+Radio direction finding for tracking invasive hornets. Several KrakenSDR ground
+stations each measure a bearing to a transmitter-tagged hornet; a management host
+collects those bearings and triangulates the position.
 
-Host-side Python tooling: it processes direction-of-arrival data from ground
-stations to triangulate a transmitter's position. The firmware and simulator
-that the ground stations themselves run live in a separate repository,
-[SensorsIot/KrakenSimulator](https://github.com/SensorsIot/KrakenSimulator).
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi-C51A4A?style=flat&logo=raspberrypi&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-> Early scaffolding — the package currently exposes only a CLI stub.
+## 🛠 Hardware targets
 
-## Development
+One repo, one directory per target. Each Pi checks out only its own code.
 
-The project ships a Python 3.11 devcontainer (`.devcontainer/`). Open the folder
-in VS Code and reopen in the container, or connect over SSH on host port `2224`:
+| Target | Hardware | Runs | Documentation |
+|--------|----------|------|---------------|
+| 📡 **Kraken Pi** | one per ground station, KrakenSDR attached | measures bearings, publishes them | [kraken_pi/README.md](kraken_pi/README.md) |
+| 🗺 **Management Pi** | one per network | collects bearings, triangulates fixes | [management_pi/README.md](management_pi/README.md) |
+| 🔗 **shared** | installed on both | geometry + wire contract | [shared/README.md](shared/README.md) |
+
+```
+Kraken Pi ──┐
+Kraken Pi ──┼──► BearingReport (JSON) ──► Management Pi ──► fix
+Kraken Pi ──┘
+```
+
+## 🚀 Setting up a Pi
+
+```bash
+git clone --filter=blob:none --no-checkout https://github.com/SensorsIot/HornetHunter.git
+cd HornetHunter
+./scripts/bootstrap-pi.sh kraken          # or: management
+```
+
+The bootstrap script puts the clone into a git **sparse-checkout** so the Pi only
+ever materialises its own target, `shared/`, `docs/` and `scripts/`. Pull and
+push work normally against the same `main` — no per-device branches, and a Pi
+cannot accidentally commit changes to the other target. Full walk-through,
+including systemd and updates: **[docs/deployment.md](docs/deployment.md)**.
+
+## 💻 Development
+
+Development happens on the DevVM devcontainer, which is the one checkout that
+carries both targets:
 
 ```bash
 ssh -p 2224 dev@dev-1.local
+cd /workspaces/HornetHunter
+pytest                                                        # all targets
+ruff check .
+mypy shared/src kraken_pi/src management_pi/src
 ```
 
-Install in editable mode with the dev tooling, then run the checks:
+Outside the container, install the three packages editable — `shared` first,
+since the targets depend on it by name:
 
 ```bash
-pip install -e . -r requirements-dev.txt
-pytest          # tests
-ruff check .    # lint
-mypy src        # types
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e shared -e kraken_pi -e management_pi -r requirements-dev.txt
 ```
 
-## Layout
+CI is split the same way as the repo: [`ci-kraken.yml`](.github/workflows/ci-kraken.yml)
+and [`ci-management.yml`](.github/workflows/ci-management.yml) are filtered by
+path, so a station-only change doesn't rebuild the management side. A change
+under `shared/` runs both.
 
-```
-src/hornethunter/   package (cli.py — entry point `hornethunter`)
-tests/              pytest suite
-```
+## 📚 Documentation
 
-## License
+- 🚀 [Deployment & the two-Pi split](docs/deployment.md)
+- 📡 [SX1262 LoRa DTU notes](docs/lora-dtu-sx1262.md)
 
-MIT
+## 🔗 Related
+
+The station firmware and the KrakenSDR simulator live in
+[SensorsIot/KrakenSimulator](https://github.com/SensorsIot/KrakenSimulator).
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE).

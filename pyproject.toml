@@ -1,21 +1,7 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[project]
-name = "hornethunter"
-version = "0.1.0"
-description = "Radio direction finding tools for tracking invasive hornets"
-readme = "README.md"
-requires-python = ">=3.11"
-license = { text = "MIT" }
-dependencies = []
-
-[project.scripts]
-hornethunter = "hornethunter.cli:main"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/hornethunter"]
+# Repo-root tool configuration. There is deliberately no [project] table here:
+# this is a monorepo, and the installable packages live in shared/, kraken_pi/
+# and management_pi/. ruff, mypy and pytest all walk up to this file, so every
+# target is checked the same way.
 
 [tool.ruff]
 line-length = 100
@@ -24,10 +10,13 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["hornethunter_shared", "hornethunter_kraken", "hornethunter_management"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["shared/tests", "kraken_pi/tests", "management_pi/tests"]
 addopts = "-q"

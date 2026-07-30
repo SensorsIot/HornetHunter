@@ -1,0 +1,25 @@
+[Unit]
+Description=HornetHunter Kraken station agent
+Documentation=https://github.com/SensorsIot/HornetHunter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hornethunter
+ExecStart=/opt/hornethunter/.venv/bin/hornethunter-kraken --config /etc/hornethunter/kraken.toml
+Restart=on-failure
+RestartSec=5
+# Journal only; the Pi's SD card should not carry a growing log file.
+StandardOutput=journal
+StandardError=journal
+
+# The agent only needs to read its config and reach the network.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadOnlyPaths=/etc/hornethunter
+
+[Install]
+WantedBy=multi-user.target

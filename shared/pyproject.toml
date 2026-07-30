@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hornethunter-shared"
+version = "0.1.0"
+description = "Shared geometry and message contract for HornetHunter targets"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hornethunter_shared"]

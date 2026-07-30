@@ -1,0 +1,44 @@
+name: Management Pi
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'management_pi/**'
+      - 'shared/**'
+      - 'pyproject.toml'
+      - '.github/workflows/ci-management.yml'
+  pull_request:
+    paths:
+      - 'management_pi/**'
+      - 'shared/**'
+      - 'pyproject.toml'
+      - '.github/workflows/ci-management.yml'
+
+jobs:
+  check:
+    name: Lint, type-check, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e shared
+          pip install -e management_pi
+          pip install -r requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check management_pi shared
+
+      - name: Mypy
+        run: mypy management_pi/src shared/src
+
+      - name: Pytest
+        run: pytest management_pi/tests shared/tests

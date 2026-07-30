@@ -1,0 +1,23 @@
+# Kraken Pi station config. Copy to /etc/hornethunter/kraken.toml and edit.
+
+[station]
+id = "kraken-01"
+# Antenna array position, WGS84 degrees.
+latitude = 47.3769
+longitude = 8.5417
+# Bearing offset applied to raw KrakenSDR angles, degrees clockwise.
+array_heading_deg = 0.0
+
+[radio]
+frequency_hz = 434_000_000
+sample_rate_hz = 2_400_000
+
+[krakensdr]
+# DoA feed of the KrakenSDR software running on this Pi.
+host = "127.0.0.1"
+port = 8081
+
+[management]
+# Where BearingReports go.
+endpoint = "http://management-pi.local:8000/reports"
+publish_interval_s = 1.0

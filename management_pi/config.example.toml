@@ -1,0 +1,17 @@
+# Management Pi config. Copy to /etc/hornethunter/management.toml and edit.
+
+[server]
+listen = "0.0.0.0"
+port = 8000
+
+[fusion]
+# Reports older than this are dropped before triangulating.
+report_ttl_s = 10.0
+# Minimum station confidence to admit a bearing into a fix.
+min_confidence = 0.3
+# Minimum number of stations required for a fix.
+min_stations = 2
+
+[stations]
+# Expected station IDs, for "station offline" reporting.
+expected = ["kraken-01", "kraken-02"]
