@@ -13,7 +13,10 @@ serial_url = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXX-if00"
 [kraken]
 # DoA source backend: "kraken" (live DoA feed), "simulator", or "synthetic" (bench).
 backend = "kraken"
-ws_url = "ws://127.0.0.1:8021"
+# The KrakenSDR DSP rewrites this CSV every update (all DoA formats but "Kerberos
+# App"); its node server serves it. This is the only local DoA interface — there is
+# no WebSocket feed. Fields: ts_ms, bearing°, conf, power_dBm, freq_Hz, ... (§12.3).
+doa_url = "http://127.0.0.1:8081/DOA_value.html"
 
 [stream]
 # Bearing stream rate cap in Hz (§5, FR-5.3): the station transmits each new DoA

@@ -75,11 +75,11 @@ In v1 these are the same person.
 ### 1.5 High-level flow
 
 ```
-   KrakenSDR ──► krakensdr_doa ──WebSocket──► Station Agent ──┐
-   (station 1)   (+ middleware)                               │
+   KrakenSDR ──► krakensdr_doa ──CSV/HTTP──► Station Agent ──┐
+   (station 1)   (:8081 DOA_value.html)                      │
                                                      HH-Link  │  bearings
-   KrakenSDR ──► krakensdr_doa ──WebSocket──► Station Agent ──┤  (LoRa or WLAN)
-   (station 2)   (+ middleware)                               │
+   KrakenSDR ──► krakensdr_doa ──CSV/HTTP──► Station Agent ──┤  (LoRa or WLAN)
+   (station 2)   (:8081 DOA_value.html)                      │
                                                               ▼
                                               ┌──────────────────────────┐
                                               │  Management Pi           │
@@ -810,23 +810,31 @@ host. Contract detail is in
 
 ### 12.2 Protocol
 
-With `doa_data_format = "Kraken Pro Local"`, the DSP posts every measurement to its
-Node middleware, which broadcasts it to all WebSocket clients on port **8021**. The
-station **subscribes and is pushed to**; it does not poll.
+The KrakenSDR DSP rewrites a single CSV file, `DOA_value.html`, on every DoA update
+and its Node server (port **8081**) serves it over HTTP. The DSP writes this file for
+**every** `doa_data_format` except `Kerberos App` (verified in
+`_sdr/_signal_processing/kraken_sdr_signal_processor.py`), so no reconfiguration is
+required — the deployed station's `Full POST` format already populates it. There is
+**no** local WebSocket DoA feed on the KrakenSDR; the station **polls**:
 
 ```
-ws://127.0.0.1:8021   →   one JSON object per measurement
+GET http://127.0.0.1:8081/DOA_value.html   →   one CSV line per active VFO
 ```
 
-The station requires `doa_data_format = Kraken Pro Local`; other formats do not
-provide this local push feed. On the deployed station `doa_data_format` is
-`Full POST` and port 8021 is not served, so the read path is confirmed once
-`Kraken Pro Local` is set at commissioning (§23.2).
+Each line is positional (DSP field order); the station consumes the first five
+fields and takes the last non-empty line:
 
-Fields consumed: `station_id`, `tStamp`, `radioBearing`, `conf`, `power`, `freq`,
-`latitude`, `longitude`, `speed`, `latency`, `processing_time`, `adc_overdrive`,
-`num_corr_sources`, `snr`. `conf` is not normalised to 0..1 (§9.3). `doaArray` (the
-full spectrum) is **not consumed in v1**.
+```
+ts_ms, bearing_deg, confidence, max_power_dBm, freq_Hz, array, latency_ms,
+station_id, lat, lon, heading, heading, "GPS", R, R, R, R, <360° spectrum...>
+```
+
+`bearing_deg` is already compass convention — the DSP writes `360 - theta`.
+`confidence` is not normalised to 0..1 (§9.3). The 360° spectrum tail is **not
+consumed in v1**. An **empty** file is a valid state, not an error: it means the VFO
+squelch is closed (no signal), so no bearing is produced and the master's staleness
+health (§8) goes RED until a signal returns. A bearing is emitted only when the DSP
+timestamp advances, so a static file is never re-reported.
 
 ### 12.3 Backends
 
@@ -834,33 +842,34 @@ One internal measurement type, three sources, selected by configuration:
 
 | Backend | Use | Transport |
 |---------|-----|-----------|
-| `kraken` | real hardware | WebSocket, port 8021 |
-| `simulator` | `KrakenSimulator` | HTTP `GET /api/v1/doa` |
+| `kraken` | real hardware | HTTP `GET :8081/DOA_value.html` (CSV) |
+| `simulator` | `KrakenSimulator` | HTTP `GET /api/v1/doa` (JSON) |
 | `synthetic` | host-tier tests, no hardware | in-process generator |
 
-The simulator and the real software use different field names and transports; the
-adapter maps between them:
+The simulator emits JSON keyed by name; the real KrakenSDR emits positional CSV. A
+name-keyed adapter maps the simulator record; the CSV is parsed by field position:
 
-| | simulator | real |
+| | simulator (JSON key) | real (CSV position) |
 |---|---|---|
-| bearing | `bearing_deg` | `radioBearing` |
-| quality | `width_rad` | `conf` |
-| power | `rssi_dbfs` | `power` |
-| frequency | `center_freq_hz` | `freq` |
-| transport | HTTP poll | WebSocket push |
+| bearing | `bearing_deg` | field 1 (`360 - theta`) |
+| quality | `width_rad` | field 2 (`confidence`) |
+| power | `rssi_dbfs` | field 3 (`max_power_dBm`) |
+| frequency | `center_freq_hz` | field 4 (`freq_Hz`) |
+| transport | HTTP JSON poll | HTTP CSV poll |
 
 ### 12.4 Requirements
 
-- **FR-12.1** [Must] The station shall maintain a subscription to the DoA feed and
-  reconnect automatically with backoff when it drops.
+- **FR-12.1** [Must] The station shall poll the DoA feed and recover automatically
+  with backoff when the endpoint is unreachable.
 - **FR-12.2** [Must] Feed availability shall be exposed as an explicit state, and
   reported in every bearing record (FR-9.6).
 - **FR-12.3** [Must] All three backends shall present one internal type; no caller
   shall branch on backend.
 - **FR-12.4** [Must] Malformed or unparseable records shall be discarded and
   counted, never propagated as bearings.
-- **FR-12.5** [Should] The agent shall ensure `doa_data_format` is
-  `Kraken Pro Local` at startup, since any other value silences the feed.
+- **FR-12.5** [Should] The station shall tolerate any `doa_data_format` except
+  `Kerberos App` (the only value that does not populate `DOA_value.html`); no
+  reconfiguration of the KrakenSDR is required to read bearings.
 - **NFR-12.1** [Must] Adapter mapping shall be pure and table-driven, testable
   without a network.
 
@@ -868,10 +877,10 @@ adapter maps between them:
 
 | Condition | Behaviour |
 |-----------|-----------|
-| WebSocket refuses connection | Retry with capped exponential backoff; feed state down; bearings still streamed |
-| Connection drops mid-stream | As above; last measurement retained and ages out per §9.7 |
-| Malformed JSON, or missing required field | Record discarded and counted (FR-12.4) |
-| `doa_data_format` not `Kraken Pro Local` | Feed silent. Detected as feed-down; §7 read-back reveals the cause |
+| HTTP endpoint refuses/unreachable | Retry with capped exponential backoff; feed state down; heartbeats still streamed |
+| Endpoint reachable but file empty | Valid no-signal state (squelch closed); no bearing produced, master goes RED per §8 |
+| Malformed or short CSV line | Record discarded and counted (FR-12.4) |
+| `doa_data_format` set to `Kerberos App` | Feed silent (the one format that skips `DOA_value.html`). Detected as feed-down; §7 read-back reveals the cause |
 | Feed faster than the bearing rate limit | Latest wins; discard count reported (FR-9.4) |
 
 ---
@@ -1441,8 +1450,8 @@ against a deliberate attacker on the RF medium is out of scope for v1.
    **manual alignment of the array to 0° heading** (§1.2, A3). A misalignment
    becomes a silent bearing error (§9.4); verify it by independent means.
 2. Enable remote configuration: set `en_remote_control` true in the KrakenSDR
-   settings locally, so a write route is available (§13.1), and set
-   `doa_data_format = Kraken Pro Local` so the DoA feed is served (§12.2).
+   settings locally, so a write route is available (§13.1). Any `doa_data_format`
+   except `Kerberos App` serves the DoA feed (§12.2); no change is required.
 3. Start the node; the agent provisions its DTU (§11) and connects to the Kraken
    feed (§12).
 4. From the Management Pi, perform a manual **full-set read** (FR-7.8) — a station

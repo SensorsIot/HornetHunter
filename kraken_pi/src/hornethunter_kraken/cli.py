@@ -101,7 +101,7 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
     carrier = SerialCarrier(str(_get("carrier", "serial_url", "/dev/serial0")))
     source = build_source(
         str(_get("kraken", "backend", "kraken")),
-        ws_url=str(_get("kraken", "ws_url", "ws://127.0.0.1:8021")),
+        doa_url=str(_get("kraken", "doa_url", "http://127.0.0.1:8081/DOA_value.html")),
         latitude=float(require(config, "station", "latitude")),
         longitude=float(require(config, "station", "longitude")),
     )

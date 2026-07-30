@@ -7,12 +7,34 @@ import itertools
 import pytest
 
 from hornethunter_kraken.doa_source import (
-    KRAKEN_ADAPTER,
     SIMULATOR_ADAPTER,
     AdapterError,
+    KrakenSource,
     SimulatorSource,
     SyntheticSource,
+    parse_doa_csv,
 )
+
+# A single-VFO line in the exact KrakenSDR DOA_value.html field order (§12.3):
+# ts_ms, bearing°, conf, power_dBm, freq_Hz, array, latency, station, lat, lon, ...
+_CSV_LINE = (
+    "1700000000000, 137.5, 159, -42.0, 148524000, UCA, 436, hb9bla-st4, "
+    "47.3769, 8.5417, 0, 0, GPS, R, R, R, R, 1.23, 4.56 \n"
+)
+
+
+class _Resp:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> _Resp:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
 
 
 def _fixed_clock(start: float = 100.0, step: float = 0.5):
@@ -48,30 +70,68 @@ def test_synthetic_confidence_may_exceed_100() -> None:
     assert max(seen) > 100.0  # conf is not normalised to 0..1 (§9.3)
 
 
-def test_kraken_adapter_maps_real_field_names() -> None:
-    record = {
-        "station_id": "kraken-07",
-        "tStamp": 1700000000,
-        "radioBearing": 137.5,
-        "conf": 159,  # >100 occurs; carried as-is (§9.3)
-        "power": -42,
-        "freq": 148524000,
-        "latitude": 47.3769,
-        "longitude": 8.5417,
-        "adc_overdrive": 1,
-        "num_corr_sources": 4,
-        "snr": 12.5,
-    }
-    m = KRAKEN_ADAPTER.adapt(record, mono_ts=100.0)
+def test_parse_doa_csv_maps_positional_fields() -> None:
+    parsed = parse_doa_csv(_CSV_LINE, mono_ts=100.0)
+    assert parsed is not None
+    timestamp_ms, m = parsed
+    assert timestamp_ms == 1700000000000
     assert m.bearing_deg == 137.5
-    assert m.confidence == 159.0
+    assert m.confidence == 159.0  # >100 occurs; carried as-is (§9.3)
     assert m.power_dbm == -42.0
     assert m.freq_hz == 148524000.0
     assert m.latitude == 47.3769
-    assert m.adc_overdrive is True
-    assert m.num_corr_sources == 4
-    assert m.snr == 12.5
+    assert m.longitude == 8.5417
+    assert m.squelch_open is True  # a written line means the VFO passed squelch
     assert m.mono_ts == 100.0
+
+
+def test_parse_doa_csv_empty_file_is_no_bearing_not_error() -> None:
+    assert parse_doa_csv("", mono_ts=0.0) is None
+    assert parse_doa_csv("   \n  \n", mono_ts=0.0) is None
+
+
+def test_parse_doa_csv_takes_last_line_of_multi_vfo() -> None:
+    two = _CSV_LINE + "1700000000000, 42.0, 80, -55, 434000000, UCA, 400, st, 0, 0 \n"
+    parsed = parse_doa_csv(two, mono_ts=1.0)
+    assert parsed is not None
+    _, m = parsed
+    assert m.bearing_deg == 42.0  # last VFO line wins
+
+
+def test_parse_doa_csv_rejects_short_line() -> None:
+    with pytest.raises(AdapterError):
+        parse_doa_csv("1, 2, 3 \n", mono_ts=0.0)
+
+
+def test_kraken_source_emits_only_on_new_timestamp() -> None:
+    frame2 = _CSV_LINE.replace("1700000000000", "1700000000437").replace("137.5", "200.0")
+    responses = iter([_CSV_LINE.encode(), _CSV_LINE.encode(), frame2.encode()])
+    source = KrakenSource(
+        "http://kraken/DOA_value.html",
+        clock=_fixed_clock(),
+        opener=lambda url: _Resp(next(responses)),
+    )
+    source.pump()  # first frame → produced
+    assert source.produced == 1
+    assert source.latest() is not None and source.latest().bearing_deg == 137.5
+    source.pump()  # same timestamp → not a new measurement
+    assert source.produced == 1
+    source.pump()  # advanced timestamp → produced again
+    assert source.produced == 2
+    assert source.latest().bearing_deg == 200.0
+    assert source.available is True
+
+
+def test_kraken_source_empty_file_available_but_no_bearing() -> None:
+    source = KrakenSource(
+        "http://kraken/DOA_value.html",
+        clock=_fixed_clock(),
+        opener=lambda url: _Resp(b""),
+    )
+    source.pump()
+    assert source.available is True  # feed up (squelch closed → no output)
+    assert source.produced == 0
+    assert source.latest() is None
 
 
 def test_simulator_adapter_maps_sim_field_names() -> None:
@@ -90,35 +150,22 @@ def test_simulator_adapter_maps_sim_field_names() -> None:
     assert m.adc_overdrive is False
 
 
-def test_adapter_rejects_missing_required_field() -> None:
-    record = {"conf": 100, "power": -40, "freq": 1.0}  # no radioBearing
+def test_simulator_adapter_rejects_missing_required_field() -> None:
+    record = {"width_rad": 0.3, "rssi_dbfs": -50, "center_freq_hz": 1.0}  # no bearing_deg
     with pytest.raises(AdapterError):
-        KRAKEN_ADAPTER.adapt(record, mono_ts=0.0)
+        SIMULATOR_ADAPTER.adapt(record, mono_ts=0.0)
 
 
-def test_adapter_rejects_non_numeric_field() -> None:
-    record = {"radioBearing": "north", "conf": 100, "power": -40, "freq": 1.0}
+def test_simulator_adapter_rejects_non_numeric_field() -> None:
+    record = {"bearing_deg": "north", "width_rad": 0.3, "rssi_dbfs": -50, "center_freq_hz": 1.0}
     with pytest.raises(AdapterError):
-        KRAKEN_ADAPTER.adapt(record, mono_ts=0.0)
+        SIMULATOR_ADAPTER.adapt(record, mono_ts=0.0)
 
 
 def test_malformed_records_are_discarded_and_counted() -> None:
     good = b'{"bearing_deg": 10, "width_rad": 0.2, "rssi_dbfs": -50, "center_freq_hz": 1}'
     bad = b'{"width_rad": 0.2}'  # missing required fields
     responses = iter([bad, good])
-
-    class _Resp:
-        def __init__(self, body: bytes) -> None:
-            self._body = body
-
-        def read(self) -> bytes:
-            return self._body
-
-        def __enter__(self) -> _Resp:
-            return self
-
-        def __exit__(self, *exc: object) -> None:
-            return None
 
     source = SimulatorSource(
         "http://sim/api/v1/doa",

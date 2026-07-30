@@ -7,7 +7,11 @@ and transports, so a pure, table-driven adapter maps each raw record to a
 
 * `SyntheticSource` — deterministic in-process generator, no I/O (host tier).
 * `SimulatorSource` — HTTP `GET /api/v1/doa` (the `KrakenSimulator`).
-* `KrakenSource` — WebSocket push on `ws://127.0.0.1:8021` (real hardware).
+* `KrakenSource` — HTTP `GET /DOA_value.html` on the KrakenSDR node server (real
+  hardware). This is the KrakenSDR's only documented local DoA interface: the DSP
+  rewrites the CSV file every update for every DoA data format except "Kerberos
+  App" (see `_sdr/_signal_processing/kraken_sdr_signal_processor.py`), and the node
+  server on port 8081 serves it. There is no WebSocket DoA feed on any KrakenSDR.
 
 Network sources reconnect with capped exponential backoff (FR-12.1), expose feed
 availability as explicit state (FR-12.2), and discard-and-count malformed or
@@ -17,7 +21,6 @@ missing-field records (FR-12.4).
 from __future__ import annotations
 
 import abc
-import contextlib
 import json
 import time
 import urllib.request
@@ -68,13 +71,66 @@ class MeasurementAdapter:
         )
 
 
-# §12.3 adapter table. Real: radioBearing/conf/power/freq. Simulator field names differ.
-KRAKEN_ADAPTER = MeasurementAdapter(
-    bearing="radioBearing", quality="conf", power="power", frequency="freq"
-)
+# §12.3 adapter table. The simulator emits JSON; the real KrakenSDR emits positional
+# CSV (see `parse_doa_csv`), so only the simulator uses a name-keyed adapter.
 SIMULATOR_ADAPTER = MeasurementAdapter(
     bearing="bearing_deg", quality="width_rad", power="rssi_dbfs", frequency="center_freq_hz"
 )
+
+# The KrakenSDR DoA node server serves the live CSV here (all formats but Kerberos App).
+DEFAULT_DOA_URL = "http://127.0.0.1:8081/DOA_value.html"
+
+
+def parse_doa_csv(text: str, *, mono_ts: float) -> tuple[int, Measurement] | None:
+    """Parse the KrakenSDR `DOA_value.html` CSV into `(timestamp_ms, Measurement)`.
+
+    Field order is fixed by the DSP writer (`kraken_sdr_signal_processor.py`, the
+    "Kraken App" branch)::
+
+        ts_ms, bearing_deg, confidence, max_power_dBm, freq_Hz, array, latency_ms,
+        station_id, lat, lon, heading, heading, "GPS", R, R, R, R, <360 spectrum...>
+
+    `bearing_deg` is already compass convention (the DSP writes ``360 - theta``).
+    The file holds one line per active VFO, rewritten in place each update; we take
+    the last non-empty line. An empty file (squelch closed, no DoA output) returns
+    ``None`` — the feed is up but has produced nothing, not an error.
+    """
+    line = ""
+    for candidate in text.splitlines():
+        if candidate.strip():
+            line = candidate
+    if not line.strip():
+        return None
+    fields = [f.strip() for f in line.split(",")]
+    if len(fields) < 5:
+        raise AdapterError(f"DOA CSV line has {len(fields)} fields, need >=5")
+    try:
+        timestamp_ms = int(float(fields[0]))
+        measurement = Measurement(
+            bearing_deg=float(fields[1]),
+            confidence=float(fields[2]),
+            power_dbm=float(fields[3]),
+            freq_hz=float(fields[4]),
+            latitude=_csv_float(fields, 8),
+            longitude=_csv_float(fields, 9),
+            adc_overdrive=False,
+            squelch_open=True,  # a written line means the VFO passed squelch
+            num_corr_sources=0,
+            snr=0.0,
+            mono_ts=mono_ts,
+        )
+    except (TypeError, ValueError) as exc:
+        raise AdapterError(f"unparseable DOA CSV line: {line!r}") from exc
+    return timestamp_ms, measurement
+
+
+def _csv_float(fields: list[str], index: int) -> float | None:
+    if index >= len(fields):
+        return None
+    try:
+        return float(fields[index])
+    except (TypeError, ValueError):
+        return None
 
 
 def _require_float(record: Mapping[str, Any], key: str) -> float:
@@ -237,78 +293,71 @@ class SimulatorSource(DoaSource):
 
 
 class KrakenSource(DoaSource):
-    """Real KrakenSDR backend over the WebSocket push feed (§12.2, §12.3)."""
+    """Real KrakenSDR backend: poll the node server's `DOA_value.html` CSV (§12.2, §12.3).
+
+    The KrakenSDR has no local push feed; the DSP rewrites a CSV file every update
+    and the node server serves it over HTTP. We GET it, parse the last line, and
+    emit a `Measurement` only when the DSP's own timestamp advances — an unchanged
+    or empty file is a valid "no new bearing" state (squelch closed / no signal),
+    not a fault. Reconnect uses capped backoff (FR-12.1); malformed lines are
+    discarded and counted (FR-12.4).
+    """
 
     def __init__(
         self,
-        url: str = "ws://127.0.0.1:8021",
+        url: str = DEFAULT_DOA_URL,
         *,
-        adapter: MeasurementAdapter = KRAKEN_ADAPTER,
         clock: Callable[[], float] = time.monotonic,
-        connector: Callable[[str], Any] | None = None,
+        opener: Callable[[str], Any] | None = None,
+        timeout_s: float = 1.0,
+        poll_interval_s: float = 0.1,
     ) -> None:
         super().__init__()
         self._url = url
-        self._adapter = adapter
         self._clock = clock
-        self._connector = connector
+        self._opener = opener or (lambda u: urllib.request.urlopen(u, timeout=timeout_s))
         self._backoff = Backoff()
         self._next_attempt = 0.0
-        self._ws: Any = None
-
-    def _connect(self) -> Any:
-        if self._connector is not None:
-            return self._connector(self._url)
-        import websocket  # lazy: real hardware only
-
-        return websocket.create_connection(self._url, timeout=1.0)
+        self._poll_interval_s = poll_interval_s
+        self._last_timestamp_ms: int | None = None
 
     def pump(self) -> None:
         now = self._clock()
-        if self._ws is None:
-            if now < self._next_attempt:
-                return
-            try:
-                self._ws = self._connect()
-            except OSError:
-                self.available = False
-                self._next_attempt = now + self._backoff.next_delay()
-                return
-            self.available = True
-            self._backoff.reset()
-        try:
-            raw = self._ws.recv()
-        except OSError:
-            self._drop(now)
+        if now < self._next_attempt:
             return
+        self._next_attempt = now + self._poll_interval_s
+        try:
+            with self._opener(self._url) as response:
+                raw = response.read()
+        except OSError:
+            self.available = False
+            self._next_attempt = now + self._backoff.next_delay()
+            return
+        self.available = True
+        self._backoff.reset()
         self._ingest(raw)
 
-    def _drop(self, now: float) -> None:
-        self._ws = None
-        self.available = False
-        self._next_attempt = now + self._backoff.next_delay()
-
     def _ingest(self, raw: str | bytes) -> None:
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
         try:
-            record = _parse_json_object(raw)
-            measurement = self._adapter.adapt(record, mono_ts=self._clock())
+            parsed = parse_doa_csv(text, mono_ts=self._clock())
         except AdapterError:
             self.discarded += 1
             return
+        if parsed is None:
+            return  # empty file: feed up, no bearing produced (squelch closed)
+        timestamp_ms, measurement = parsed
+        if timestamp_ms == self._last_timestamp_ms:
+            return  # same DSP frame already emitted; not a new measurement
+        self._last_timestamp_ms = timestamp_ms
         self._latest = measurement
         self.produced += 1
-
-    def close(self) -> None:
-        if self._ws is not None:
-            with contextlib.suppress(OSError):
-                self._ws.close()
-            self._ws = None
 
 
 def build_source(
     backend: str,
     *,
-    ws_url: str = "ws://127.0.0.1:8021",
+    doa_url: str = DEFAULT_DOA_URL,
     sim_url: str = "http://127.0.0.1:8080/api/v1/doa",
     clock: Callable[[], float] = time.monotonic,
     latitude: float | None = None,
@@ -320,5 +369,5 @@ def build_source(
     if backend == "simulator":
         return SimulatorSource(sim_url, clock=clock)
     if backend == "kraken":
-        return KrakenSource(ws_url, clock=clock)
+        return KrakenSource(doa_url, clock=clock)
     raise ValueError(f"unknown kraken backend {backend!r}")

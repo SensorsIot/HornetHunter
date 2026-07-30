@@ -26,65 +26,69 @@ how bearings come out, and how configuration goes in.
 |---------|------|----------------------|---------|
 | Dash UI | 8080 | ✅ open | operator web UI; browser only |
 | Middleware (Express) | 8042 | ✅ open, but **`/settings` 404s** | upstream documents settings REST here |
-| Middleware WebSocket | 8021 | ✅ **closed** | upstream fans DoA records out here |
-| miniserve | 8081 | ✅ open, serves `settings.json` | **the route that works** |
+| Middleware WebSocket | 8021 | ✅ **closed — no DoA feed here on any format** | upstream never opens a DoA WebSocket in this build |
+| miniserve / node | 8081 | ✅ open, serves `settings.json` **and `DOA_value.html`** | **the read path** |
 
-Port 8021 being closed may be a consequence of the current `doa_data_format`
-rather than the feature's absence — upstream starts the WebSocket server
-conditionally. ⚠️ Re-probe after switching the format (§2).
+There is **no local WebSocket DoA feed** on this KrakenSDR. Port 8021 is closed and
+staying closed — the DoA read path is the CSV file the DSP writes (§2), served on
+8081. ✅ (verified in source, `kraken_sdr_signal_processor.py`, and by port scan.)
 
-## 2. Reading bearings
+## 2. Reading bearings — `DOA_value.html` CSV poll ✅
 
-The station currently runs **`doa_data_format = "Full POST"`** ✅ — which is the one
-mode to avoid. Its code path calls
-`requests.get("https://ip.seeip.org/jsonip?")` **synchronously, with no timeout,
-inside the processing loop, once per second**. 📖 (sigproc:866) On a field
-deployment with no internet this stalls the DSP thread every second. Changing this
-is the first configuration action for any station.
-
-### Preferred: WebSocket push 📖
-
-Set `doa_data_format = "Kraken Pro Local"`. The DSP then POSTs every measurement to
-the middleware's `/doapost`, which broadcasts it to all WebSocket clients on
-port 8021. The station agent **subscribes**; it never polls.
+The DSP rewrites a single file, `DOA_value.html`, in place on **every** update, for
+**every** `doa_data_format` except `Kerberos App` — the CSV write is gated only on
+`self.data_ready and self.theta_0_list`, independent of format
+(`kraken_sdr_signal_processor.py:753`). ✅ The node server on 8081 serves it:
 
 ```
-ws://127.0.0.1:8021   ->   one JSON object per DoA measurement
+GET http://127.0.0.1:8081/DOA_value.html   ->   one CSV line per active VFO
 ```
 
-Record fields (`wr_json`, sigproc:1161): `station_id`, `tStamp`, `gps_timestamp`,
-`latitude`, `longitude`, `gpsBearing`, `speed`, `radioBearing`, `conf`, `power`,
-`freq`, `antType`, `latency`, `processing_time`, `doaArray`, `adc_overdrive`,
-`num_corr_sources`, `snr`. 📖
+Positional fields (the "Kraken App" write block, `sigproc:756`):
 
-**Must be validated on hardware before we depend on it** (⚠️), since 8021 is
-currently closed and the deployed build differs from upstream in at least one known
-way (§3).
+```
+ts_ms, 360−θ (bearing, compass), conf, max_power_dBm, freq_Hz, array, latency_ms,
+station_id, lat, lon, heading, heading, "GPS", R, R, R, R, <360° spectrum...>
+```
 
-### Fallback: `DOA_value.html` polling 📖
+The station consumes the first five fields and takes the last non-empty line. The
+bearing is already compass convention because the DSP writes **`360 − θ₀`**, not
+`θ₀` — do not re-flip it. An **empty** file is normal: the VFO squelch is closed
+(no signal), so the DSP emits nothing; the station reports "feed up, no bearing" and
+the master goes RED (§8). A bearing is emitted only when `ts_ms` advances, so a
+static file is never re-reported.
 
-A single CSV line rewritten in place each cycle and served over HTTP. Polling
-rather than push, and the bearing is written as `360 − θ₀` rather than `θ₀` — an
-easy sign error. Viable if the WebSocket path proves unavailable.
+**This works with the currently deployed `Full POST` format — no reconfiguration is
+required to read bearings.** ✅
+
+### Recommended production format: `Kraken App`
+
+`Full POST` additionally calls `requests.get("https://ip.seeip.org/jsonip?")`
+**synchronously, no timeout, inside the processing loop once per second**
+(`sigproc:869`) 📖 — on a field deployment with no internet this stalls the DSP
+thread every second. `Kraken App` writes the same `DOA_value.html` but performs no
+outbound POST or IP lookup, so it is the clean production setting. This is an
+optimisation, **not** a prerequisite for reading bearings.
 
 ### Do not use
 
+- **`Kerberos App`** — the one format that does **not** write `DOA_value.html`
+  (`sigproc:754`); it would silence our read path. ✅
 - **`Kraken Pro Remote`** — relays measurements to `wss://map.krakenrf.com:2096`,
   a third-party cloud. 📖
-- **`Full POST`** — the synchronous public-IP lookup described above. 📖
 
 ## 3. Writing configuration
 
 ### What works today: miniserve on 8081 ✅
 
 ```bash
-curl http://<station>:8081/settings.json                    # verified working
-curl -F "path=@settings.json" http://<station>:8081/upload\?path\=/   # upload
+curl http://<station>:8081/settings.json                    # verified working ✅
+curl -F "path=@settings.json" http://<station>:8081/upload   # 404 on this build ✅
 ```
 
-The read is confirmed on our station (HTTP 200, 4498 bytes). The upload half is
-documented upstream but **not tested here** ⚠️ — it writes to a live station, so it
-needs a deliberate test, not a probe.
+The read is confirmed on our station (HTTP 200). The `/upload` route is **not
+present on this build**: a multipart POST to `:8081/upload` returns **404** ✅
+(tested this session). 8081 is read-only here; the write path is unresolved (§6).
 
 ### What upstream documents: middleware REST on 8042 📖
 
@@ -173,13 +177,18 @@ Fields the feed offers beyond bearing and confidence:
 
 ## 6. Open items
 
-- Whether port 8021 opens once `doa_data_format` is `Kraken Pro Local`. ⚠️
-  **Blocking** — it decides the read path.
-- Whether the 8081 `/upload` route accepts our writes and the watcher picks them
-  up. ⚠️ **Blocking** — it decides the write path.
-- The installed middleware / DSP version, and whether updating it would provide
-  `8042/settings`. ⚠️
+- ~~Whether port 8021 opens~~ **Resolved** ✅ — there is no local DoA WebSocket; the
+  read path is the `DOA_value.html` CSV poll (§2), implemented and working.
+- ~~Whether the 8081 `/upload` route accepts writes~~ **Resolved** ✅ — `/upload`
+  returns 404 on this build. The **write path is still unresolved**: neither
+  `:8081/upload` nor `:8042/settings` exists here. Candidates: a direct
+  `_share/settings.json` disk write (owned by `krakenrf`) that the 0.5 s watcher
+  picks up, or updating the DSP build to expose `:8042/settings`. ⚠️ **Blocking for
+  remote config write.**
+- The installed middleware / DSP version (`1.8.1`, git `e5df8c9`), and whether
+  updating it would provide `8042/settings`. ⚠️
 - Retune settling time after `config_daq_rf`. ⚠️
 - `conf` range and scale — needed before quantising it for the LoRa link. ⚠️
-- Whether `POST`/upload validates input, or will happily write a settings file that
-  wedges the DSP. ⚠️
+- A live end-to-end bearing test requires a signal above the VFO squelch
+  (`vfo_squelch_0 ≈ −63 dBm`) at 148.524 MHz. Until a transmitter is present the
+  CSV file stays empty (correctly reported as no-bearing). ⚠️ **Needs a signal.**
