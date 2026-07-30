@@ -25,8 +25,8 @@ v1 provides two capabilities and makes their behaviour measurable:
 
 **In scope**
 
-- The station↔management data link: framing, reliability (ARQ), addressing, poll
-  scheduling, and link health indication.
+- The station↔management data link: framing, the streamed bearing path and the
+  acknowledged configuration path (ARQ), addressing, and link health indication.
 - Automatic selection between the WLAN and LoRa carriers.
 - Reading DoA measurements from the KrakenSDR software.
 - Distributing the KrakenSDR configuration set to stations, and detecting when a
@@ -83,7 +83,7 @@ In v1 these are the same person.
                                                               ▼
                                               ┌──────────────────────────┐
                                               │  Management Pi           │
-                                              │  poll · health · UI      │
+                                              │  receive · health · UI   │
                                               │  numeric display + log   │
                                               └──────────────────────────┘
                         configuration deltas ──────────┘ (same link, reverse)
@@ -95,17 +95,23 @@ In v1 these are the same person.
 
 ### 2.1 Logical architecture
 
-The Management Pi is the **master** and owns the schedule. Nothing transmits on the
-LoRa medium unless the master invited it.
+The two directions of the link have different reliability needs, so they use
+different mechanisms.
 
-One cycle:
+**Bearings stream, unacknowledged.** Each station transmits a **BEARING**
+autonomously whenever its KrakenSDR produces a new direction estimate (~2.3 Hz,
+§12) — no poll, no schedule, no acknowledgement. A lost bearing is simply skipped:
+the next estimate is ~0.4 s behind, so retransmitting a stale angle is pointless.
+The Management Pi is a passive receiver for bearings; a station's liveness is
+judged purely by whether fresh bearings keep arriving (§8).
 
-1. Master broadcasts a **POLL** naming the cycle and the expected repliers.
-2. Each station transmits a **BEARING** in its assigned time slot.
-3. Configuration deltas, when pending, are sent between cycles and explicitly
-   acknowledged.
+**Configuration is request/response, acknowledged.** The Management Pi is the only
+node that initiates traffic: it reads and writes KrakenSDR configuration, each
+exchange explicitly acknowledged and retransmitted until confirmed (§10.5). This is
+occasional and operator-driven, and is the *only* path that uses ARQ.
 
-Stations never initiate, and are mutually deaf by construction (§18.2).
+Stations share the medium best-effort (§18.2). At the bearing duty cycle of a few
+stations, collisions are rare and a collided bearing is just another skipped one.
 
 ### 2.2 Hardware / platform architecture
 
@@ -138,7 +144,8 @@ receiver shares the `ttyACM` namespace and enumeration order is not stable acros
 boots (NFR-15.3).
 
 Station count is a configuration property. The addressing scheme (§18) and the
-slotted cycle (§5) accommodate additional stations without protocol change.
+best-effort bearing stream (§5) accommodate additional stations without protocol
+change.
 
 ### 2.3 Software architecture
 
@@ -158,8 +165,8 @@ the previous known-good snapshot to disk (§7.6). Both nodes append structured l
 to local rotating files (§20). Nothing else is persisted in v1.
 
 **A station agent shall not depend on the health of its KrakenSDR software.** It is
-a separate process; it continues to answer polls and accept configuration pushes
-when the DSP is stopped, wedged, or misconfigured (§13.4).
+a separate process; it continues to stream bearings and accept configuration
+pushes when the DSP is stopped, wedged, or misconfigured (§13.4).
 
 ### 2.4 Component layering
 
@@ -170,8 +177,8 @@ logic**. The L0/L1 line is ownership — whether the protocol is implemented her
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ L2  Application logic                                                        │
 │  ┌────────────┐ ┌───────────┐ ┌──────────────┐ ┌───────────┐ ┌────────────┐  │
-│  │ Poll Cycle │ │ Transport │ │  Parameter   │ │  Link     │ │  Bearing   │  │
-│  │ Scheduler  │ │ Selector  │ │ Distribution │ │  Health   │ │  Pipeline  │  │
+│  │  Bearing   │ │ Transport │ │  Parameter   │ │  Link     │ │  Bearing   │  │
+│  │  Stream    │ │ Selector  │ │ Distribution │ │  Health   │ │  Pipeline  │  │
 │  │   §5       │ │    §6     │ │     §7       │ │   §8      │ │    §9      │  │
 │  └────────────┘ └───────────┘ └──────────────┘ └───────────┘ └────────────┘  │
 ├──────────────────────────────────────────────────────────────────────────────┤
@@ -223,13 +230,13 @@ runs with no hardware attached.
 
 **Deliverables**
 
-- DTU provisioning over AT (§11), poll cycle scheduler (§5), health evaluator (§8).
+- DTU provisioning over AT (§11), bearing stream (§5), health evaluator (§8).
 - Kraken DoA source with its three backends (§12.3) and settings client (§13).
 - Parameter distribution end to end with divergence detection (§7).
 - Management UI: numeric display, all parameter panels, log pane (§14).
 - Structured logging on both nodes (§20).
 
-**Exit criteria.** Both stations poll continuously over LoRa on the bench for one
+**Exit criteria.** Both stations stream bearings continuously over LoRa on the bench for one
 hour with health reported and no unexplained gaps; a parameter change reaches a
 station and is confirmed by read-back; a corrupted station configuration raises
 `CONFIG_DIVERGED` and is repaired by one automatic full push.
@@ -274,51 +281,50 @@ station and is confirmed by read-back; a corrupted station configuration raises
 
 # Part A — Application Logic (L2)
 
-## 5. Poll Cycle Scheduler
+## 5. Bearing Stream
 
 ### 5.1 Purpose and scope
 
-Owns the schedule on the shared medium. Runs on the Management Pi. Decides when to
-poll, which stations are expected to answer, and how long to wait before declaring
-a slot missed.
+Governs how bearings move from stations to the Management Pi. Bearings are
+**streamed**: each station transmits autonomously at its KrakenSDR's DoA cadence,
+and the Management Pi ingests whatever arrives. There is no schedule, no reply slot
+and no acknowledgement (§2.1).
 
 ### 5.2 Requirements
 
-- **FR-5.1** [Must] The scheduler shall broadcast one POLL per cycle addressed to
-  the broadcast address, inviting all configured stations simultaneously.
-- **FR-5.2** [Must] Each station shall be assigned a fixed reply slot index, and
-  shall transmit its BEARING only within that slot.
-- **FR-5.3** [Must] The cycle period shall be configurable, and the scheduler shall
-  apply the configured period without imposing a policy limit of its own (§1.2).
-- **FR-5.4** [Must] A slot with no valid BEARING by its deadline shall be recorded
-  as a missed slot for that station and reported to §8.
-- **FR-5.5** [Should] When a station misses its slot, the scheduler shall retry
-  that station with a **unicast** POLL rather than re-broadcasting.
-- **NFR-5.1** [Must] Cycle timing jitter shall be logged; the scheduler shall not
-  silently drift.
+- **FR-5.1** [Must] A station shall transmit one BEARING per new direction estimate
+  from its DoA source (§12), at that source's native cadence, without being invited.
+- **FR-5.2** [Must] Bearings shall be sent unacknowledged and shall never be
+  retransmitted; a lost bearing is skipped (§2.1).
+- **FR-5.3** [Should] A station shall rate-limit its bearing stream to a
+  configurable maximum, collapsing to the newest estimate when the DoA cadence
+  exceeds it, so link airtime stays bounded (Appendix B).
+- **FR-5.4** [Must] The Management Pi shall accept a BEARING from any configured
+  station at any time, record its arrival time, and forward it to health (§8) and
+  the UI (§14).
+- **FR-5.5** [Must] A BEARING from an unconfigured station id shall be discarded,
+  counted, and logged at most once per minute (§18).
+- **NFR-5.1** [Must] Bearing ingest shall be independent of configuration traffic:
+  a configuration exchange in flight shall not block or delay bearing reception.
 
-### 5.3 Cycle structure
+### 5.3 Stream structure
 
-```
-t=0     POLL (broadcast)          master transmits
-t=g     ├─ slot 1  station 1 BEARING
-t=g+s   └─ slot 2  station 2 BEARING
-t=T     next cycle
-```
-
-`g` is a guard interval after the POLL, `s` the slot width, `T` the cycle period —
-all configuration (§19). Slot width shall exceed the airtime of a maximum-size
-BEARING frame plus the station's turnaround time. Measured airtimes for sizing are
-in Appendix B.
+Each station transmits on its own cadence with no coordination between stations.
+The medium is shared and best-effort: two stations may occasionally transmit at
+once and lose both frames (§18.2). Because bearings are cheap and frequent this is
+tolerated rather than prevented — at the airtime of a bearing frame (Appendix B)
+and a handful of stations, the collision rate is low and a collided bearing is
+simply the one that is skipped. Operators who require zero collisions may place
+stations on separate LoRa channels (§17.4, §18).
 
 ### 5.4 Failure modes
 
 | Condition | Behaviour |
 |-----------|-----------|
-| Slot empty | Missed slot recorded; unicast retry per FR-5.5; §8 informed |
-| Frame arrives outside its slot | Accepted but flagged `late` in the log; slot still counted as filled |
-| Frame from an unconfigured station | Discarded, counted, logged once per minute |
-| Cycle overruns its period | Cycle truncated, overrun logged; next cycle starts on schedule |
+| No bearing for longer than the staleness threshold | Station declared stale (RED) by §8; nothing is retransmitted |
+| Bearing lost to a CRC error or a collision | Discarded silently; the next estimate (~0.4 s) supersedes it |
+| Bearing from an unconfigured station | Discarded, counted, logged once per minute |
+| DoA cadence exceeds the configured rate limit | Newest estimate sent, intermediate ones dropped (FR-5.3) |
 
 ---
 
@@ -343,7 +349,7 @@ Chooses the carrier — WLAN or LoRa — **independently for each station**.
   carrier, disabling automatic selection for that station.
 - **FR-6.6** [Must] The active carrier shall be recorded on every bearing record
   and every log line (§20.3).
-- **NFR-6.1** [Must] A carrier switch shall not lose a frame that was in flight;
+- **NFR-6.1** [Must] A carrier switch shall not lose an in-flight configuration transaction;
   the pending ARQ transaction is retried on the new carrier.
 
 ### 6.3 Defaults
@@ -361,17 +367,17 @@ Chooses the carrier — WLAN or LoRa — **independently for each station**.
 Both carriers run the identical frame protocol (§10), so a switch changes only the
 byte carrier; the codec, the ARQ state machine and the message set are unchanged.
 
-- The health window **resets** on any carrier change (§8.4).
-- The configured cycle period may differ per carrier; a change of update rate on
+- A carrier change does not reset health: a bearing is a bearing on either carrier (§8).
+- The bearing rate limit may differ per carrier; a change of update rate on
   switch is logged.
 
 ### 6.5 Failure modes
 
 | Condition | Behaviour |
 |-----------|-----------|
-| Both carriers down | Station enters `LOST` (§8.3); polling continues on LoRa |
-| WLAN reachable but station process dead | Probes fail → demote to LoRa → also fails → `LOST`. Distinguished in the log by probe-vs-frame failure |
-| Carrier pinned and that carrier fails | No automatic fallback; station goes `LOST` and the UI states that a pin is in force |
+| Both carriers down | Station goes `RED` (§8): no bearings arrive |
+| WLAN reachable but station process dead | Probes fail → demote to LoRa → no bearings arrive → `RED`. Distinguished in the log by probe-vs-bearing failure |
+| Carrier pinned and that carrier fails | No automatic fallback; station goes `RED` and the UI states that a pin is in force |
 
 ---
 
@@ -458,13 +464,13 @@ management                                     station
    │ crc' == C ?  yes → in sync
    │              no  → CONFIG_DIVERGED
    │
-   │◄──── BEARING(version, crc) ──── every cycle ──│   continuous re-verification
+   │◄──── BEARING(version, crc) ───── streamed ──│   continuous re-verification
 ```
 
 The CRC is computed from the read-back, so the check catches the KrakenSDR clamping
 a value, rejecting it, or its settings watcher never observing the write. The CRC
 rides on every bearing, so a station whose configuration is changed locally is
-detected within one cycle.
+detected within one bearing.
 
 ### 7.6 Revert and recovery
 
@@ -489,62 +495,63 @@ channel that undoes it.
 
 ### 8.1 Purpose and scope
 
-Converts link behaviour into a single per-station indicator and into metrics for
-later audit.
-
-**Health is derived from retransmission behaviour only.** Signal strength is
-displayed as information but does not contribute to the indicator.
+Converts each station's **bearing arrival** into a single per-station liveness
+indicator and into metrics for later audit. Health asks one question: *are fresh
+bearings still arriving?* Because bearings stream unacknowledged (§5), there are no
+retransmission counts to read — liveness is staleness. Signal strength (RSSI) is
+displayed as information but does not contribute.
 
 ### 8.2 Requirements
 
-- **NFR-8.1** [Must] Health shall be computed **exclusively** from retransmission
-  and delivery outcomes. RSSI shall not contribute.
-- **FR-8.1** [Must] Health shall be evaluated over a rolling window of the last
-  `window_cycles` cycles, per station.
-- **FR-8.2** [Must] The indicator shall be `GREEN` when no retransmission occurred
-  in the window.
-- **FR-8.3** [Must] The indicator shall be `ORANGE` when retransmissions occurred
-  but every cycle was ultimately delivered and the retry rate is at or below
-  `retry_rate_threshold`.
-- **FR-8.4** [Must] The indicator shall be `RED` when ARQ was exhausted on any
-  cycle, **or** the retry rate exceeds `retry_rate_threshold`, **or** no bearing has
-  been received for `stale_cycles` consecutive cycles.
-- **FR-8.5** [Must] The window shall be **reset** on any carrier change (§6.4).
-- **FR-8.6** [Must] `CONFIG_DIVERGED` (§7.5) shall be indicated **independently** of
+- **NFR-8.1** [Must] Health shall be computed **exclusively** from bearing arrival.
+  RSSI shall not contribute.
+- **FR-8.1** [Must] The evaluator shall track, per station, the time since the last
+  BEARING was received.
+- **FR-8.2** [Must] The indicator shall be `GREEN` while a BEARING has arrived
+  within the last `staleness_threshold_s`.
+- **FR-8.3** [Must] The indicator shall become `RED` when no BEARING has arrived for
+  longer than `staleness_threshold_s`, and shall return to `GREEN` on the next
+  BEARING.
+- **FR-8.4** [Should] The evaluator may report `ORANGE` when bearings are still
+  arriving but the measured arrival rate over a rolling window falls below
+  `orange_rate_fraction` of the expected rate — early warning short of going stale.
+- **FR-8.5** [Must] `CONFIG_DIVERGED` (§7.5) shall be indicated **independently** of
   link health, not folded into it.
-- **FR-8.7** [Must] The evaluator shall expose retry count, retry rate, consecutive
-  misses, round-trip time and last-received RSSI for display and logging.
-- **NFR-8.2** [Must] Thresholds and window length shall be configurable at runtime.
+- **FR-8.6** [Must] The evaluator shall expose time-since-last-bearing, measured
+  arrival rate and last-received RSSI for display and logging.
+- **NFR-8.2** [Must] The staleness threshold and window shall be configurable at
+  runtime.
 
 ### 8.3 States
 
 | State | Condition | Meaning |
 |-------|-----------|---------|
-| 🟢 `GREEN` | zero retransmissions in window | delivering first-try |
-| 🟠 `ORANGE` | retries present, all cycles delivered, rate ≤ threshold | degraded, still working |
-| 🔴 `RED` | ARQ exhausted, or rate > threshold, or `stale_cycles` consecutive misses | operator action required |
-| ⚫ `LOST` | no traffic on either carrier | terminal case of `RED`; §6.5 |
-| 🟣 `CONFIG_DIVERGED` | version/CRC mismatch | independent axis; wrong-data fault, not a link fault |
+| 🟢 `GREEN` | a BEARING within `staleness_threshold_s` | receiving |
+| 🟠 `ORANGE` | receiving, but arrival rate below `orange_rate_fraction` of expected (FR-8.4) | degraded, still receiving |
+| 🔴 `RED` | no BEARING for longer than `staleness_threshold_s` | signal lost; operator action |
+| 🟣 `CONFIG_DIVERGED` | CRC mismatch (§7.5) | independent axis; wrong-data fault, not a link fault |
 
-The reliability requirement is: *no station shall enter `ORANGE` during normal
-operation.*
+Health is carrier-agnostic: a bearing is a bearing whether it arrived over LoRa or
+WLAN. The active carrier is displayed alongside (FR-6.6) but does not change the
+verdict.
 
 ### 8.4 Defaults
 
 | Parameter | Default |
 |-----------|---------|
-| `window_cycles` | 20 |
-| `retry_rate_threshold` | 20 % (more than 4 of 20 cycles needing a retransmission) |
-| `stale_cycles` | 5 |
+| `staleness_threshold_s` | 1.0 |
+| rate window | 10 s |
+| `orange_rate_fraction` | 0.5 (below half the expected bearing rate) |
 
-Thresholds and window length are runtime configuration (NFR-8.2).
+Threshold and window are runtime configuration (NFR-8.2).
 
 ### 8.5 Failure modes
 
 | Condition | Behaviour |
 |-----------|-----------|
-| Window not yet full after start or reset | State reported as `GREEN` with an explicit `warming_up` qualifier; thresholds not applied until the window fills |
-| Station on WLAN | Retries are near-zero, so health reads `GREEN` regardless of RF conditions. The indicator is **always displayed with its carrier** (FR-6.6); `GREEN` on WLAN makes no claim about the LoRa link |
+| No bearing ever received since start | `RED` once the staleness threshold elapses; no warm-up needed |
+| Bearings arriving but sparse | `ORANGE` if below the rate fraction, else `GREEN`; nothing is retransmitted |
+| Station on WLAN | Judged identically — freshness of arriving bearings, independent of RF |
 
 ---
 
@@ -553,18 +560,19 @@ Thresholds and window length are runtime configuration (NFR-8.2).
 ### 9.1 Purpose and scope
 
 Runs on the station. Converts the KrakenSDR measurement stream into the compact
-record transmitted once per cycle.
+record streamed on each new estimate (§5).
 
 ### 9.2 Requirements
 
 - **FR-9.1** [Must] The station shall subscribe to the DoA stream (§12) and retain
   the most recent measurement.
-- **FR-9.2** [Must] On being polled, the station shall transmit the **latest**
-  measurement, not an average or a batch.
+- **FR-9.2** [Must] The station shall transmit the **latest** measurement as each
+  new estimate arrives, not an average or a batch; when the rate limit (FR-5.3)
+  collapses estimates, it transmits the newest.
 - **FR-9.3** [Must] Each record shall carry the measurement's **age in
   milliseconds** at the moment of transmission.
 - **FR-9.4** [Must] The station shall report how many measurements were produced
-  and discarded since the previous poll.
+  and discarded since the previous transmission.
 - **FR-9.5** [Must] Station position shall be transmitted **only when it has
   changed** beyond `position_epsilon` since the last transmitted position.
 - **FR-9.6** [Must] Records shall indicate whether the KrakenSDR feed is live, and
@@ -625,7 +633,7 @@ and unit-tested, and `management_pi` exposes a `--fix-from` entry point. These a
 
 | Condition | Behaviour |
 |-----------|-----------|
-| No DoA measurement ever received | Record sent with `no_data`; station still answers polls |
+| No DoA measurement ever received | Record streamed with `no_data`; station keeps streaming |
 | Feed stalls mid-operation | `kraken_link_up` cleared, `age_ms` grows; ages beyond `max_age_ms` reported as `no_data` |
 | `age_ms` would overflow `u16` (>65.5 s) | Clamped to `0xFFFF` and `no_data` set |
 | Bearing outside 0..359.99° | Discarded, counted, logged; previous measurement retained |
@@ -670,23 +678,26 @@ self-delimiting.
 
 | Type | Name | Direction | ACKed | Payload |
 |-----:|------|-----------|-------|---------|
-| 0x1 | `POLL` | master → broadcast or unicast | implicitly, by the reply | cycle seq, slot width, expected-station bitmap |
-| 0x2 | `BEARING` | station → master | — (it *is* the poll response) | §9.3 record |
-| 0x3 | `ACK` | either | — | acked seq, config version, config CRC, status flags |
+| 0x1 | *(reserved)* | — | — | formerly `POLL`; unused in the streaming model (§5) |
+| 0x2 | `BEARING` | station → master | **no — streamed** (§5) | §9.3 record |
+| 0x3 | `ACK` | master ↔ station | — | acked seq, config version, config CRC, status flags |
 | 0x4 | `PARAM_DELTA` | master → station | yes | changed `(id, value)` entries |
 | 0x5 | `PARAM_FULL` | master → station | yes | full set; fragmented |
 | 0x6 | `PARAM_REQ` | master → station | yes | request full-set report |
 | 0x7 | `PARAM_REPORT` | station → master | yes | full set; fragmented |
 | 0x8 | `IDENT` | station → master | yes | agent version, schema version, capabilities |
 
-Fragmented types carry `frag_index` and `frag_total` at the head of the payload.
+Only the configuration exchange (types 0x3–0x8) is acknowledged and retransmitted
+(§10.5); `BEARING` is fire-and-forget (§5). Fragmented types carry `frag_index` and
+`frag_total` at the head of the payload.
 
 ### 10.4 Requirements
 
 - **FR-10.1** [Must] Frames shall be self-delimiting by sync word, length and CRC,
   and the receiver shall recover from arbitrary garbage without operator action.
-- **FR-10.2** [Must] The identical frame format and ARQ logic shall be used over
-  both carriers.
+- **FR-10.2** [Must] The identical frame format shall be used over both carriers;
+  the configuration ARQ (§10.5) is likewise carrier-independent. Bearings carry no
+  ARQ on either carrier (§5).
 - **FR-10.3** [Must] Payload shall not exceed 200 bytes; larger messages shall be
   fragmented at the HH-Link layer (FR-10.6).
 - **FR-10.4** [Must] The receiver shall strip a carrier-appended RSSI byte before
@@ -700,20 +711,27 @@ Fragmented types carry `frag_index` and `frag_total` at the head of the payload.
 - **NFR-10.1** [Must] The codec shall be a pure function of bytes, independent of
   carrier and of wall-clock time.
 
-### 10.5 ARQ
+### 10.5 ARQ — configuration path only
 
-**Stop-and-wait**, one outstanding frame per direction per station.
+ARQ covers **only** the configuration exchange (§7): `PARAM_DELTA`, `PARAM_FULL`,
+`PARAM_REQ`, `PARAM_REPORT` and their `ACK`s. Bearings are never acknowledged or
+retransmitted (§5). Configuration uses **stop-and-wait**, one outstanding frame per
+direction per station.
 
 | Parameter | Default |
 |-----------|---------|
-| retransmission timeout | 400 ms |
-| maximum attempts | 3 (original plus two retransmissions) |
+| retransmission timeout | 1000 ms |
+| maximum attempts | 5 (original plus four retransmissions) |
 | sequence space | `u8`, wrapping |
 
-The carrier discards frames that fail their own PHY CRC (§15.3), so this link loses
+The timeout must exceed a full round trip of the largest fragment: a ~126-byte
+frame is ~215 ms on air each way (Appendix B), so the request, the reply and both
+turnarounds do not fit inside the old 400 ms — hence the 1000 ms default. The
+carrier discards frames that fail their own PHY CRC (§15.3), so the link loses
 frames but never delivers corrupted ones; sequence-plus-ACK-plus-retransmit is
-sufficient. On exhausting attempts the frame is abandoned, the failure is reported
-to §8, and no automatic recovery is attempted (N4).
+sufficient. On exhausting attempts the configuration operation is abandoned and
+reported to §7 — the change stays **unconfirmed and pending**, never silently
+assumed applied (N4).
 
 ### 10.6 Failure modes
 
@@ -722,7 +740,7 @@ to §8, and no automatic recovery is attempted (N4).
 | Partial frame received | Retained in the reassembly buffer until complete or `frame_timeout` elapses, then discarded and counted |
 | Garbage / lost sync | Byte-wise resynchronisation on the sync word; discarded bytes counted |
 | Coalesced frames in one read | All complete frames extracted from the buffer in order |
-| CRC failure | Discarded and counted (FR-10.5); ARQ handles the retransmission |
+| CRC failure | Discarded and counted (FR-10.5); a config frame is retransmitted by ARQ, a bearing is simply skipped (§5) |
 | Duplicate delivery | Re-acknowledged, applied once (FR-10.7) |
 | Fragment set incomplete | Whole set discarded after `frag_timeout`; sender retries the set |
 
@@ -850,11 +868,11 @@ adapter maps between them:
 
 | Condition | Behaviour |
 |-----------|-----------|
-| WebSocket refuses connection | Retry with capped exponential backoff; feed state down; polls still answered |
+| WebSocket refuses connection | Retry with capped exponential backoff; feed state down; bearings still streamed |
 | Connection drops mid-stream | As above; last measurement retained and ages out per §9.7 |
 | Malformed JSON, or missing required field | Record discarded and counted (FR-12.4) |
 | `doa_data_format` not `Kraken Pro Local` | Feed silent. Detected as feed-down; §7 read-back reveals the cause |
-| Feed faster than the poll cycle | Latest wins; discard count reported (FR-9.4) |
+| Feed faster than the bearing rate limit | Latest wins; discard count reported (FR-9.4) |
 
 ---
 
@@ -948,8 +966,8 @@ A browser-facing interface on the Management Pi. Its peer is the operator.
 ### 14.3 Requirements
 
 - **FR-14.1** [Must] The UI shall display, per station: bearing, confidence, power,
-  measurement age, discard count, active carrier, health state, retry count and
-  rate, round-trip time, last RSSI, `config_version` and configuration state.
+  measurement age, discard count, active carrier, health state, time since last
+  bearing, bearing rate, last RSSI, `config_version` and configuration state.
 - **FR-14.2** [Must] Values shall be **numeric**; v1 shall provide no graphical
   bearing display, plot, or map.
 - **FR-14.3** [Must] The UI shall expose **every** KrakenSDR settings field,
@@ -984,7 +1002,7 @@ Grouped as the KrakenSDR software groups them; its documentation is vendored at
 | VFO 0–15 | `vfo_freq_N`, `vfo_bw_N`, `vfo_squelch_N`, `vfo_squelch_mode_N`, `vfo_demod_N`, `vfo_iq_N`, `vfo_fir_order_factor_N` |
 | Station Information | `station_id`, `location_source`, `latitude`, `longitude`, `heading`, `doa_data_format`, `krakenpro_key`, `rdf_mapper_server` |
 | Recording / System | `en_data_record`, `write_interval`, `logging_level`, `en_hw_check`, `disable_tooltips` |
-| Link | carrier pin, health thresholds, cycle period, log tail |
+| Link | carrier pin, staleness threshold, bearing rate limit, log tail |
 
 Field types, units and ranges come from the field registry (§7.3), so the form is
 generated from data. `center_freq` is in **MHz** while `vfo_freq_N` is in **Hz**.
@@ -1069,7 +1087,7 @@ External software on the station host. We configure it and consume its outputs.
 
 Our agent and this software start independently. **The agent shall not gate its own
 startup on the software being present or healthy** (§2.3, FR-13.4): it starts,
-answers polls, and reports the feed as down.
+streams bearings, and reports the feed as down.
 
 ### 16.3 Requirements
 
@@ -1107,7 +1125,7 @@ configure units, paths and dependencies.
 
 | Condition | Behaviour |
 |-----------|-----------|
-| Service crash | systemd restarts; restart counted and logged; health window resets |
+| Service crash | systemd restarts; restart counted and logged; bearings resume, RED clears |
 | Disk full | Rotation bounds log growth (§20.4); logging degrades before operation does |
 | Clock jumps (no NTP) | Tolerated: v1 uses no absolute cross-node time (§9.5). Log timestamps record monotonic time alongside wall-clock |
 
@@ -1263,11 +1281,11 @@ of them.
 
 | Node | DTU `AT+ADDR` | Consequence |
 |------|---------------|-------------|
-| Management Pi | `0xFFFF` | its polls reach every station; it hears every station |
+| Management Pi | `0xFFFF` | its config frames reach every station; it hears every station's bearings |
 | Station *n* | `0x0001`, `0x0002`, … | stations are **mutually deaf** |
 
-A broadcast poll reaches all stations in one transmission (§5.3), and no station
-processes another's reply.
+A broadcast config frame reaches all stations in one transmission (§5.3), and no
+station hears another's bearing stream.
 
 ---
 
@@ -1277,7 +1295,7 @@ processes another's reply.
 
 - **FR-19.1** [Must] All tunables shall be declared in configuration with documented
   defaults; none shall be hard-coded at a call site.
-- **FR-19.2** [Must] Health thresholds, window length and cycle period shall be
+- **FR-19.2** [Must] The health staleness threshold and the bearing rate limit shall be
   changeable at runtime without restart (NFR-8.2).
 - **FR-19.3** [Must] Radio parameters shall be applied verbatim, without
   plausibility checking (A2).
@@ -1286,12 +1304,12 @@ processes another's reply.
 
 | Group | Keys |
 |-------|------|
-| identity | `station.id`, `station.name`, `station.slot_index` |
+| identity | `station.id`, `station.name` |
 | link | `link.address`, `link.channel`, `link.sf`, `link.bw`, `link.cr`, `link.power`, `link.lbt`, `link.rssi_append`, `link.key` |
 | carrier | `carrier.serial_url`, `carrier.tcp_endpoint`, `carrier.probe_interval_s`, `carrier.probe_timeout_s`, `carrier.promote_probes`, `carrier.demote_probes`, `carrier.dwell_s`, `carrier.pin` |
-| cycle | `cycle.period_ms`, `cycle.guard_ms`, `cycle.slot_ms` |
-| arq | `arq.timeout_ms`, `arq.max_attempts`, `arq.frame_timeout_ms`, `arq.frag_timeout_ms` |
-| health | `health.window_cycles`, `health.retry_rate_threshold`, `health.stale_cycles` |
+| stream | `stream.max_rate_hz` |
+| arq | `arq.timeout_ms`, `arq.max_attempts`, `arq.frame_timeout_ms`, `arq.frag_timeout_ms` (config path only, §10.5) |
+| health | `health.staleness_threshold_s`, `health.orange_rate_fraction`, `health.rate_window_s` |
 | kraken | `kraken.backend`, `kraken.ws_url`, `kraken.settings_url`, `kraken.param_apply_timeout_s` |
 | bearing | `bearing.position_epsilon_dm`, `bearing.max_age_ms`, `bearing.reference_lat`, `bearing.reference_lon` |
 | logging | `log.path`, `log.max_bytes`, `log.backup_count`, `log.level` |
@@ -1315,8 +1333,8 @@ interface behaved as it did.
 - **FR-20.2** [Must] Every transmitted and received frame shall be logged with
   direction, type, source, destination, sequence, length, attempt number, round-trip
   time, CRC result, carrier, and RSSI when available.
-- **FR-20.3** [Must] Every health state transition, ARQ exhaustion, carrier switch
-  and health-window reset shall be logged with its cause.
+- **FR-20.3** [Must] Every health state transition, configuration ARQ exhaustion and
+  carrier switch shall be logged with its cause.
 - **FR-20.4** [Must] Every parameter operation shall be logged with the fields
   changed, `config_version`, expected and observed CRC, and read-back differences.
 - **FR-20.5** [Must] Kraken feed connects, drops, malformed records, discard counts
@@ -1324,7 +1342,7 @@ interface behaved as it did.
 - **FR-20.6** [Must] **Logs shall never be transmitted over the LoRa carrier.**
 - **FR-20.7** [Must] Every record shall carry both wall-clock and monotonic
   timestamps (§17.3).
-- **NFR-20.1** [Must] Logging shall never block the poll cycle; it shall drop
+- **NFR-20.1** [Must] Logging shall never block bearing ingest or the config exchange; it shall drop
   records and count the drops in preference to stalling.
 
 ### 20.3 Carrier attribution
@@ -1365,9 +1383,9 @@ surfaced and left for a human (N4).
 
 | Subsystem | Safe state |
 |-----------|-----------|
-| Station, no Kraken feed | Answers polls, reports `no_data` |
-| Station, no carrier | Continues measuring; the Management Pi shows `LOST` |
-| Management Pi, station silent | Retains last values, greyed with age; keeps polling |
+| Station, no Kraken feed | Streams `no_data` |
+| Station, no carrier | Continues measuring; the Management Pi shows `RED` |
+| Management Pi, station silent | Retains last values, greyed with age; keeps listening |
 | Configuration diverged | Latched after one resync attempt; no further automatic change |
 | DTU unconfigurable | Assume pre-configured, warn, continue |
 
@@ -1448,7 +1466,7 @@ change misbehaves.
 
 | Symptom | Path |
 |---------|------|
-| Station `RED` or `LOST` | §8.3, §6.5 — carrier state, then power and antenna |
+| Station `RED` | §8.3, §6.5 — carrier state, then power and antenna |
 | `CONFIG_DIVERGED` latched | §7.7 — inspect read-back differences in the log, then manual full push |
 | No bearings, link healthy | §12.5 — Kraken feed, then `doa_data_format` |
 | Station read-only, pushes rejected | §13.1 — enable `en_remote_control` locally |
@@ -1467,7 +1485,7 @@ bug can manifest**.
 | Tier | Environment | Speed | Covers |
 |------|-------------|-------|--------|
 | **host** | pure Python, no hardware, no network | ms | frame codec, CRC, RSSI-byte stripping, fragmentation, ARQ state machine under injected loss, delta computation, canonical config encoding, health state machine, bearing encode/decode, adapter field mapping |
-| **bench** | Universal Embedded Workbench, two real DTUs on RFC2217, plus `simulator` or `synthetic` DoA source | s–min | DTU provisioning over AT, real transparent-mode framing including split and coalesced packets, poll cycle timing and slotting, carrier switching, end-to-end parameter push with read-back, sustained-run stability |
+| **bench** | Universal Embedded Workbench, two real DTUs on RFC2217, plus `simulator` or `synthetic` DoA source | s–min | DTU provisioning over AT, real transparent-mode framing including split and coalesced packets, bearing streaming and rate limiting, carrier switching, end-to-end parameter push with read-back, sustained-run stability |
 | **field** | real antennas, real separation, real KrakenSDR | hours | link reliability at range, health threshold calibration, everything whose behaviour depends on link margin |
 
 **Layer-to-tier mapping.** L2 application logic is pure and tested at the host tier.
@@ -1488,14 +1506,14 @@ until calibrated at the field tier.
 | AT-3 | Split, coalesced and garbage-prefixed byte streams are recovered without loss of valid frames | host | FR-10.1, §10.6 |
 | AT-4 | RSSI-append byte is stripped before CRC validation; frames validate with append on and off | host | FR-10.4 |
 | AT-5 | Canonical CRC is stable across JSON reformatting and float re-serialisation, and unaffected by GPS-mutated fields | host | FR-7.4 |
-| AT-6 | Health state machine produces the specified colour for constructed retry sequences; window resets on carrier change | host | FR-8.1–FR-8.5 |
+| AT-6 | Health produces GREEN / ORANGE / RED for constructed bearing-arrival sequences (fresh, sparse, stale past the threshold) | host | FR-8.1–FR-8.5 |
 | AT-7 | Simulator and real record shapes both map to the internal type | host | FR-12.3, NFR-12.1 |
 | AT-8 | DTU provisioning is idempotent; AT mode is always exited, including on injected error | bench | FR-11.2, FR-11.5, NFR-11.1 |
-| AT-9 | Two stations poll continuously for one hour with no unexplained gaps; all cycles accounted for in the log | bench | FR-5.1–FR-5.4, NFR-20.1 |
+| AT-9 | Two stations stream bearings for one hour; no station goes stale (RED) except on injected outages, and gaps are accounted for in the log | bench | FR-5.1–FR-5.4, NFR-20.1 |
 | AT-10 | Single-field change reaches a station, applies live, and is confirmed by read-back CRC | bench | FR-7.1, FR-13.1, FR-13.2 |
 | AT-11 | Externally corrupted station configuration raises `CONFIG_DIVERGED`, is repaired by exactly one automatic full push, and latches if corrupted again | bench | FR-7.7 |
-| AT-12 | Carrier switch during traffic loses no frame; window resets; carrier stamped on every record | bench | NFR-6.1, FR-6.6, FR-8.5 |
-| AT-13 | Station remains pollable with the KrakenSDR software stopped, and reports `no_data` | bench | FR-13.4, NFR-16.1, FR-9.6 |
+| AT-12 | Carrier switch during a config exchange retries the in-flight transaction on the new carrier; bearings continue; carrier stamped on every record | bench | NFR-6.1, FR-6.6 |
+| AT-13 | Station keeps streaming `no_data` with the KrakenSDR software stopped | bench | FR-13.4, NFR-16.1, FR-9.6 |
 | AT-14 | Management restart resumes delta operation from the persisted mirror with no full push | bench | FR-7.9 |
 | AT-15 | Link stays out of `ORANGE` for a sustained run at intended deployment range | field | §8.3 |
 | AT-16 | Health thresholds calibrated against measured retry behaviour at range | field | §8.4, NFR-8.2 |
@@ -1545,8 +1563,9 @@ two DTUs; identical with antennas and with dummy loads.
 A fixed cost of ~60 ms per packet dominates small frames, so a 10-byte bearing
 record and a 20-byte delta cost almost the same airtime.
 
-Derived frame sizes: `POLL` ≈ 12 B, `BEARING` ≈ 19 B (23 B with position),
-single-field `PARAM_DELTA` ≈ 12 B. A full set over 158 fields (§7.3), serialising
+Derived frame sizes: `BEARING` ≈ 19 B (23 B with position), single-field
+`PARAM_DELTA` ≈ 12 B, a full `PARAM_REPORT` fragment ≈ 126 B (**~215 ms on air** at
+SF7/BW125 — the number that sets the config ARQ timeout, §10.5). A full set over 158 fields (§7.3), serialising
 only VFO slots up to `active_vfos` (FR-7.10), runs to several hundred bytes and
 **3–4 fragments, on the order of 1–1.5 s**.
 
@@ -1554,14 +1573,12 @@ only VFO slots up to `active_vfos` (FR-7.10), runs to several hundred bytes and
 
 | Key | Default |
 |-----|---------|
-| `cycle.period_ms` | 1000 |
-| `cycle.guard_ms` | 40 |
-| `cycle.slot_ms` | 150 |
-| `arq.timeout_ms` | 400 |
-| `arq.max_attempts` | 3 |
-| `health.window_cycles` | 20 |
-| `health.retry_rate_threshold` | 0.20 |
-| `health.stale_cycles` | 5 |
+| `stream.max_rate_hz` | 5 |
+| `arq.timeout_ms` | 1000 |
+| `arq.max_attempts` | 5 |
+| `health.staleness_threshold_s` | 1.0 |
+| `health.orange_rate_fraction` | 0.5 |
+| `health.rate_window_s` | 10 |
 | `carrier.probe_interval_s` | 5 |
 | `carrier.probe_timeout_s` | 1 |
 | `carrier.promote_probes` | 3 |
