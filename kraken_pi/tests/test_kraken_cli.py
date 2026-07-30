@@ -14,7 +14,7 @@ latitude = 47.3769
 longitude = 8.5417
 
 [radio]
-frequency_hz = 434000000
+frequency_hz = 148524000
 
 [management]
 endpoint = "http://management-pi.local:8000/reports"
@@ -43,7 +43,7 @@ def test_self_test_emits_a_valid_report(
     payload = capsys.readouterr().out.strip()
     report = BearingReport.from_json(payload)
     assert report.station_id == "kraken-07"
-    assert report.frequency_hz == 434_000_000
+    assert report.has_position
     assert json.loads(payload)["latitude"] == pytest.approx(47.3769)
 
 
@@ -65,8 +65,5 @@ def test_incomplete_config_names_the_missing_key(tmp_path: Path) -> None:
 
 
 def test_synthetic_report_has_zero_confidence() -> None:
-    config = {
-        "station": {"id": "kraken-07", "latitude": 1.0, "longitude": 2.0},
-        "radio": {"frequency_hz": 1},
-    }
-    assert synthetic_report(config, now=123.0).confidence == 0.0
+    config = {"station": {"id": "kraken-07", "latitude": 1.0, "longitude": 2.0}}
+    assert synthetic_report(config).confidence == 0.0

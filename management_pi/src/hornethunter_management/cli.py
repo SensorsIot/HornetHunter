@@ -39,10 +39,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def fix_from_reports(reports: list[BearingReport]) -> LatLon | None:
-    """Triangulate a batch of reports, ignoring stations that report no signal."""
-    observations = [
-        (LatLon(r.latitude, r.longitude), r.bearing_deg) for r in reports if r.confidence > 0.0
-    ]
+    """Triangulate a batch of reports, ignoring stations that report no signal.
+
+    A v2 seam: v1 displays bearings only and computes no fix (FSD 9.6). Reports
+    without a position are skipped -- position rides only on change (FSD FR-9.5),
+    so a caller must pair each report with the station's last known position
+    before a fix can use it.
+    """
+    observations: list[tuple[LatLon, float]] = []
+    for report in reports:
+        if report.latitude is None or report.longitude is None:
+            continue
+        if report.confidence <= 0.0 or not report.has_data:
+            continue
+        observations.append((LatLon(report.latitude, report.longitude), report.bearing_deg))
+
     if len(observations) < 2:
         return None
     return triangulate(observations)

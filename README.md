@@ -1,8 +1,11 @@
 # 🐝 HornetHunter
 
 Radio direction finding for tracking invasive hornets. Several KrakenSDR ground
-stations each measure a bearing to a transmitter-tagged hornet; a management host
-collects those bearings and triangulates the position.
+stations each measure a bearing to a transmitter-tagged hornet and report it to a
+management host over LoRa (or WLAN when co-located).
+
+**v1 displays bearings only.** Triangulating them into a position fix is v2 — see
+[docs/hornethunter-fsd.md](docs/hornethunter-fsd.md).
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi-C51A4A?style=flat&logo=raspberrypi&logoColor=white)
@@ -14,14 +17,14 @@ One repo, one directory per target. Each Pi checks out only its own code.
 
 | Target | Hardware | Runs | Documentation |
 |--------|----------|------|---------------|
-| 📡 **Kraken Pi** | one per ground station, KrakenSDR attached | measures bearings, publishes them | [kraken_pi/README.md](kraken_pi/README.md) |
-| 🗺 **Management Pi** | one per network | collects bearings, triangulates fixes | [management_pi/README.md](management_pi/README.md) |
-| 🔗 **shared** | installed on both | geometry + wire contract | [shared/README.md](shared/README.md) |
+| 📡 **Kraken Pi** | one per ground station, KrakenSDR attached | measures bearings, answers polls | [kraken_pi/README.md](kraken_pi/README.md) |
+| 🗺 **Management Pi** | one per network | polls stations, displays bearings, distributes settings | [management_pi/README.md](management_pi/README.md) |
+| 🔗 **shared** | installed on both | wire contract + geometry | [shared/README.md](shared/README.md) |
 
 ```
 Kraken Pi ──┐
-Kraken Pi ──┼──► BearingReport (JSON) ──► Management Pi ──► fix
-Kraken Pi ──┘
+Kraken Pi ──┼──► BearingReport ──► Management Pi ──► numeric display
+Kraken Pi ──┘        (LoRa / WLAN)         └──► settings deltas ──►
 ```
 
 ## 🚀 Setting up a Pi
@@ -66,8 +69,10 @@ under `shared/` runs both.
 
 ## 📚 Documentation
 
+- 📋 [Functional Specification (FSD)](docs/hornethunter-fsd.md) — the design contract
 - 🚀 [Deployment & the two-Pi split](docs/deployment.md)
 - 📡 [SX1262 LoRa DTU notes](docs/lora-dtu-sx1262.md)
+- 🛰 [KrakenSDR integration](docs/krakensdr-integration.md)
 
 ## 🔗 Related
 

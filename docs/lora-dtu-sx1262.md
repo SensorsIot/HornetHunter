@@ -1,88 +1,141 @@
 # SX1262 LoRa DTU — Notes & Reference
 
-Working notes for the SX1262 LoRa DTU modules (transparent serial-over-LoRa
-bridges), as characterised on the Universal Embedded Workbench. Written for a
-multi-station project (≥ 4 stations).
+Working notes for the SX1262 LoRa DTU modules (Waveshare USB-TO-LoRa-xF), as
+characterised on the Universal Embedded Workbench. Written for a multi-station
+project.
 
-> **Confidence key:** ✅ verified on hardware · ⚠️ inferred / needs the vendor
-> manual to confirm. AT-register introspection was **not** possible remotely
-> (see §3), so anything about AT values below the wire is from the shipped
-> `sscom` presets, not a live read.
+> **Confidence key**
+> - ✅ **verified on this hardware** — observed directly on our two sticks
+>   (firmware **Ver1.2**, LF variant)
+> - 📖 **vendor documentation** — stated by Waveshare; not independently confirmed
+> - ⚠️ **inferred / unverified** — needs a measurement before it is relied upon
+>
+> Sources: [Waveshare USB-TO-LoRa-xF wiki](https://www.waveshare.com/wiki/USB-TO-LoRa-xF),
+> the shipped `sscom` presets in [SX1262-LoRa-DTU-sscom5.13.1-en/](SX1262-LoRa-DTU-sscom5.13.1-en/),
+> and direct AT probing over the workbench.
+
+> **Correction notice.** An earlier revision of this document concluded that AT
+> configuration mode was unreachable over the wire and required a hardware config
+> pin. **That was wrong** — the escape sequence must be terminated with CRLF. See
+> §3. Several parameter values and ranges were also wrong; the AT table in §7 has
+> been rebuilt from live queries.
 
 ---
 
 ## 1. What these are
 
 - SX1262 (sub-GHz LoRa) modules on a **USB-serial dongle** (WCH CH343,
-  `1a86:55d3`, enumerates as `/dev/ttyACM*`).
-- Default personality is a **transparent data pipe**: bytes into one module's
-  UART come out the peer's UART over LoRa. No framing, addressing, or
-  handshake of your own is required for a 2-node link.
-- Configured over an **AT command set** (§7). Three shipped example modes:
-  Packet, Stream, Relay (the `sscom` preset folders) — they differ mainly in
-  `AT+KEY` (encryption) and the relay/repeater role. ⚠️ Not fully characterised.
+  `1a86:55d3`, enumerates as `/dev/ttyACM*`). ✅
+- Two variants, and they only talk to their own kind: 📖
+
+  | Variant | Band | Default channel |
+  |---------|------|-----------------|
+  | **LF** (ours) | 410–490 MHz | **23 → 433 MHz** ✅ |
+  | HF | 850–930 MHz | 18 → 868 MHz |
+
+- Default personality is a **transparent data pipe** (`AT+MODE=1`, "Stream"): bytes
+  into one module's UART come out its peers' UARTs over LoRa. ✅
+- Three operating modes: **1 = Stream, 2 = Packet, 3 = Relay** (§6). ✅
+- Configured over an AT command set (§7), reachable over the serial link (§3).
+- Advertised: 22 dBm max TX, −148 dBm sensitivity (see §5 for what that figure
+  actually means), up to 5 km, AES, 960-byte cache, automatic packetisation. 📖
+
+### Channel-to-frequency mapping ✅
+
+Channels are `0..80` in **1 MHz** steps:
+
+```
+LF:  f_MHz = 410 + channel      (channel 23 → 433 MHz)
+HF:  f_MHz = 850 + channel      (channel 18 → 868 MHz)
+```
+
+Confirmed both ways: our LF sticks default to `TXCH=RXCH=23`, and Waveshare
+documents 18 → 868 MHz for HF.
 
 ## 2. Reaching them on the workbench
 
 Each dongle is a workbench slot exposed as an **RFC2217** serial-over-TCP port.
-Drive them through the workbench (never SSH):
+Drive them through the workbench (never SSH).
 
-| Slot | RFC2217 URL | devnode |
-|------|-------------|---------|
-| SLOT1 | `rfc2217://<host>:4001` | `/dev/ttyACM1` |
-| SLOT3 | `rfc2217://<host>:4003` | `/dev/ttyACM0` |
+| Slot | RFC2217 URL |
+|------|-------------|
+| SLOT1 | `rfc2217://workbench.local:4001` |
+| SLOT3 | `rfc2217://workbench.local:4003` |
 
-- **UART: 115200 8N1** ✅ (wrong baud → garbage both ways; 115200 gives clean
-  byte-exact transfer).
-- Open with **`dtr=False, rts=False`** (matches the workbench's own
-  `serial_monitor`; the proxy passes DTR/RTS through).
-- The RFC2217 proxy honours the client's negotiated baud (pyserial
-  `PortManager`), so `serial.serial_for_url("rfc2217://…")` with `baudrate=…`
-  works as expected. See the script in Appendix A.
+- **Do not hardcode device nodes.** The slot→`/dev/ttyACM*` mapping is
+  enumeration-order dependent and has been observed to swap between boots. ✅
+  Resolve slot → URL from `GET http://workbench.local:8080/api/devices`.
+- `workbench.local` does not resolve inside the devcontainer (no mDNS); the
+  container adds a `--add-host` mapping. See `.devcontainer/devcontainer.json`.
+- **UART: 115200 8N1** ✅ (wrong baud → garbage both ways).
+- Open with **`dtr=False, rts=False`**, matching the workbench's own
+  `serial_monitor`; the proxy passes DTR/RTS through. ✅
+- One RFC2217 client at a time per port. ✅
 
-## 3. How the link works — and the gotchas that cost time
+## 3. Entering AT mode — the CRLF gotcha
 
-- **Transparent mode has no local echo.** Bytes you write to a module are *not*
-  echoed back on that same port — they cross to the peer. Debugging by writing
-  `AT`/`+++` to a port and reading the *same* port shows nothing even though the
-  link is fine. Always read the **peer** port. ✅ (this was the single biggest
-  red herring.)
-- **First-packet warm-up loss.** ✅ Right after opening a fresh connection the
-  first 1–2 transmissions are dropped while the link settles; steady-state is
-  then 100 %. Send a throwaway byte and discard the first reply.
-- **AT mode could not be entered over the wire.** ⚠️ `+++` (the escape, per the
-  preset `N2=A,+++`) with a proper ≥1 s guard produced no response at any baud
-  or DTR/RTS state. On this DTU AT/config mode is most likely gated behind a
-  **hardware config pin/button**, not reachable through the CH343 control lines.
-  Plan to configure the modules **before** deployment (with the vendor tool /
-  the config pin), not remotely through the workbench.
-- **A DTR/RTS pulse does not reset the module** (`/api/serial/reset` captured no
-  boot banner), and the modules emit **no boot output**. ✅
+**The escape is `+++\r\n`. A bare `+++` is silently ignored.** ✅
+
+This is the correction referenced at the top. Probed directly on SLOT1:
+
+```
+'+++'        -> (no response)
+'+++\r\n'    -> '+++'          then AT mode is active
+```
+
+Everything follows from that:
+
+- **Every AT command must be CRLF-terminated.** 📖✅ The vendor FAQ says as much:
+  *"Enable carriage return and line feed by checking the corresponding option. Use a
+  baud rate of 115200 to send '+++' to enter command mode."*
+- **There is no config pin or jumper.** The KEY button does only two things: 📖
+  - held within 3 s of power-on → firmware update mode
+  - held **after** 3 s of power-on → **factory reset** (an accidental-reset hazard
+    worth considering for field enclosures)
+- **Settings take effect on `AT+EXIT`.** Leaving AT mode is mandatory or the
+  parameters do not apply. 📖
+- **Always guarantee `AT+EXIT`** on every exit path. A stick left in AT mode passes
+  no data. Recovery is `AT+REBOOT` (§7) or a power cycle.
+- In AT mode the module **does** answer on its own port — unlike transparent mode.
+  The "no local echo" behaviour below applies only to data mode.
+
+### Other transparent-mode gotchas ✅
+
+- **No local echo.** Bytes written to a module are not echoed on that port — they
+  cross to the peer. Debugging by writing to a port and reading the *same* port
+  shows nothing even when the link is fine. Read the **peer**.
+- **First-packet warm-up loss.** After opening a fresh connection the first 1–2
+  transmissions are dropped while the link settles; steady state is then 100 %. Send
+  a throwaway frame and discard the reply.
+- **A DTR/RTS pulse does not reset the module**, and the modules emit no boot
+  banner. Use `AT+REBOOT` for a software reset.
 
 ## 4. Error correction & reliability
 
-LoRa gives you integrity for free, but **not** delivery:
+LoRa gives you integrity for free, but **not** delivery.
 
-- **FEC (forward error correction):** built into the LoRa PHY via the coding
-  rate. Preset is `CR=1` = **4/5** (lightest). Configurable to 4/8 for stronger
-  correction at the cost of airtime.
-- **CRC (error *detection*):** the SX1262 appends a payload CRC and the receiver
-  validates it in hardware — **a failed packet is silently dropped, never
-  delivered.** ✅ Every test here was byte-perfect; corrupt bytes are never
-  handed up. (Contrast the OOK 433 sensors, whose weak 8-bit CRC lets corruption
-  through — **this link needs no plausibility/sanity filter.**)
-- **No ARQ (no acknowledgement / retransmission).** The command set has no
-  `AT+ACK`. A packet lost to a failed CRC is simply gone → you get **loss, never
-  corruption.**
+- **FEC**: built into the LoRa PHY via the coding rate. Ours is `CR=1` = 4/5
+  (lightest); configurable to 4/8 for stronger correction at the cost of airtime. ✅
+- **CRC**: the SX1262 appends a payload CRC and the receiver validates it in
+  hardware. **A failed packet is silently dropped, never delivered**, and **the CRC
+  cannot be disabled**. 📖 Every test here was byte-perfect. ✅
+- **No ARQ.** There is no `AT+ACK` in the command set. A packet lost to a failed CRC
+  is simply gone.
 
-**Implication:** if lost packets matter, add a *thin* app-layer reliability
-protocol — and it can be simple because detection is already guaranteed:
-**sequence number + ACK + retransmit** is enough; you never have to detect
-corruption yourself. If loss is acceptable (periodic telemetry), add nothing.
+**Therefore: you get loss, never corruption.** If lost packets matter, add a thin
+app-layer protocol — and it can be simple, because detection is already guaranteed:
+**sequence number + ACK + retransmit** is sufficient, and you never have to detect
+corruption yourself. If loss is acceptable, add nothing.
+
+**`AT+LBT=1` costs up to 2 seconds.** Listen-before-talk delays a transmission
+while the channel is noisy, *"the maximum delay is two seconds, and the sending will
+be forced after more than two seconds."* 📖 Any ARQ timeout must exceed that, or LBT
+will manufacture phantom retransmissions. If a higher layer already schedules the
+medium, LBT is redundant and harmful — leave it off.
 
 ## 5. Performance vs packet length
 
-Measured at SF7 / BW125 / CR4-5, byte-perfect at every size:
+Measured at SF7 / BW 125 kHz / CR 4-5, byte-perfect at every size. ✅
 
 | payload | latency | throughput |
 |--------:|--------:|-----------:|
@@ -94,103 +147,154 @@ Measured at SF7 / BW125 / CR4-5, byte-perfect at every size:
 | 200 B | 385 ms | 520 B/s |
 | 240 B | 445 ms | **540 B/s** |
 
-- There is a **fixed ~50–60 ms cost per packet** (preamble + header +
-  transparent-mode idle-gap packetisation), paid regardless of size.
-- So **throughput climbs ~8×** from tiny to ~240 B packets as that overhead is
-  amortised, flattening toward ~540 B/s (the channel limit for this config).
-  ~240 B is a single LoRa frame; larger writes fragment. ⚠️ (fragment threshold
-  not pinned down; ≥ ~240 B).
+- **Airtime is independent of link margin.** ✅ These figures were re-measured with
+  **dummy loads** fitted instead of antennas and reproduced to within 1 ms. Useful
+  consequence: the bench is valid for protocol and timing work — but bench
+  *reliability* figures are best-case and say nothing about the field.
+- There is a **fixed ~50–60 ms cost per packet** (preamble, header, and
+  transparent-mode idle-gap packetisation), paid regardless of size. So a 6-byte
+  payload and a 16-byte payload cost almost the same airtime.
+- **Throughput climbs ~8×** from tiny to ~240 B packets as that overhead is
+  amortised, flattening toward ~540 B/s for this configuration.
 - **Rule: batch, don't dribble.** 240 B as one packet = 445 ms; the same data as
   sixty 4-B packets ≈ 3.7 s. Only use small packets for genuinely small,
-  latency-sensitive messages (the ~60 ms floor is unavoidable).
-- These numbers are **config-specific**: raising SF (for range) increases every
-  latency substantially; stronger CR adds a little.
+  latency-sensitive messages — the ~60 ms floor is unavoidable.
+- **Maximum single packet is exactly 240 bytes.** 📖 *"the maximum data size of a
+  single packet is 240 bytes, if it exceeds 240 bytes, it will be automatically
+  packetized."* Keep frames under 240 B and framing stays predictable.
+- The 960-byte cache and automatic packetisation are **fixed and not
+  configurable**. 📖
 
-## 6. Addressing multiple stations (≥ 4)
+### What "−148 dBm" actually means ⚠️
 
-Our 2-node test used the simplest case: both modules identical (`NETID=0`,
-`TXCH=RXCH=18`, `ADDR=0`, transparent) → a **broadcast bus**. Two ways to scale
-to 4+ stations:
+The headline sensitivity is the **best case at maximum spreading factor and minimum
+bandwidth** (SF12 / 7.8 kHz), not at our settings. At **SF7 / BW 125 kHz** the
+SX1262 datasheet gives roughly **−123 dBm** — about 25 dB worse. Range expectations
+and any RSSI threshold must be based on the configured mode, not the headline.
+(Datasheet-derived; not measured here.)
 
-### Option A — Transparent broadcast bus + app-layer addressing ✅ (proven base)
+Raising SF increases every latency in the table substantially; stronger CR adds a
+little; wider BW cuts airtime roughly proportionally at the cost of sensitivity.
 
-- Give every station **the same** radio params: `SF`, `BW`, `CR`, `NETID`, and
-  `TXCH=RXCH` (one channel).
-- Every station then hears **every** transmission. You add addressing **in your
-  payload** — e.g. a small header `[dest_id][src_id][seq]…` — and each station
-  ignores frames not addressed to it.
-- It is a **half-duplex shared medium with no built-in MAC**: only one station
-  may transmit at a time and there is no collision avoidance unless you enable
-  **`AT+LBT=1`** (listen-before-talk). With 4+ nodes you *must* impose order:
-  - **Master/polling (recommended):** one coordinator polls each station by id
-    in turn; a station transmits only when polled. Deterministic, collision-free,
-    easy to reason about. Pair with seq+ACK per exchange (§4).
-  - or lightweight TDMA / random-backoff + LBT if there is no natural master.
+## 6. Addressing and modes
 
-### Option B — Module-level fixed-point addressing ⚠️ (needs manual)
+### Stream mode (`AT+MODE=1`) — group-addressed, *not* a flat broadcast 📖
 
-- The AT set exposes `AT+ADDR` (node address), `AT+NETID` (network), and
-  `AT+TXCH`/`AT+RXCH` (channels) — the ingredients for a "fixed transmission"
-  mode where each frame is prefixed with a **target address (+channel)** and the
-  module delivers only to that node.
-- This offloads addressing to the module, but the **exact frame prefix format
-  and the `AT+MODE` value that enables it are not confirmed** (could not enter
-  AT mode; no manual on hand). Verify from the vendor manual before relying on it.
+This is the correction that matters most for network design. A receiver in Stream
+mode accepts a frame only when **both its address and its channel match the
+sender's** — with one exception: **address `0xFFFF`** receives from all addresses on
+its channel, and its own transmissions reach all of them.
 
-### Recommended architecture for the 4-station project
+Waveshare's own example table proves it: with Devices A/C/D at `0xFFFE` and Device E
+at `0x0000`, all on channel 18, **E does not receive A's traffic**. Device F on
+channel 65 receives nothing.
 
-1. All stations on **one `NETID` + one channel + identical SF/BW/CR** (use a
-   *different* `NETID` only to isolate a separate network).
-2. **Master-poll** on that shared channel with a 1-byte station id in the
-   payload header (Option A). Deterministic, no collisions, scales past 4.
-3. Add **seq + ACK + retransmit** for any data that must not be lost (§4).
-4. Keep payloads **chunky** (near ~240 B) for throughput (§5); one poll→reply
-   round trip is ~0.9 s at 240 B each way, so budget the poll cycle accordingly
-   (4 stations ≈ a few seconds per full round at max payload).
-5. Enable **`AT+LBT=1`** as a safety net against overlap.
-6. **Configure every module before deployment** (§3) — addresses/params can't be
-   set remotely through the workbench.
+So the useful topology for a master/stations network is:
+
+| Node | `AT+ADDR` | Effect |
+|------|-----------|--------|
+| Master | `0xFFFF` | its transmissions reach every station; it hears every station |
+| Station *n* | `0x0001`, `0x0002`, … | stations are **mutually deaf** |
+
+Mutual deafness is a feature: no station is confused by another's replies, and one
+broadcast transmission from the master reaches all stations at once. All nodes must
+share `SF`, `BW`, `CR`, `NETID` and channel.
+
+Because the medium is half-duplex with no MAC, something must impose order —
+master/polling is the simplest and is collision-free by construction.
+
+### Packet mode (`AT+MODE=2`) — module-level addressing 📖
+
+The **first 3 bytes** of each transmitted stream specify the destination:
+
+```
+[ADDR_hi][ADDR_lo][channel] payload…
+
+  e.g.  FF FE 12 AA   → to address 0xFFFE on channel 0x12 (18), payload 0xAA
+```
+
+`0xFFFF` is the broadcast address. This costs 3 bytes per frame, versus 1–2 bytes
+for app-layer addressing in Stream mode — so Stream mode plus your own header is
+both cheaper and simpler unless you specifically want the module to filter.
+
+### Relay mode (`AT+MODE=3`) 📖
+
+Relay nodes forward Stream- or Packet-mode traffic and **output nothing on their own
+interface**. Endpoints keep their normal mode and are distinguished by `NETID`; the
+relay's address is formed from the endpoint `NETID` values. Multi-level chains are
+supported.
 
 ## 7. AT command reference
 
-Query form `AT+X?`, set form `AT+X=value`. Values shown are the shipped preset.
-Enter AT mode with `+++` (guard-timed); leave with `AT+EXIT`. ⚠️ Remote entry
-did not work here — assume a config pin is required.
+Query `AT+X?`, set `AT+X=value`, and `AT+X=?` reports the parameter's **type** (not
+its range). All commands CRLF-terminated. Values below are the **live defaults read
+from our LF sticks, firmware Ver1.2**. ✅
 
-| Command | Meaning | Preset / values |
-|---------|---------|-----------------|
-| `AT` | ping (expect `OK`) | — |
-| `+++` | escape data→AT mode (no CR, ~1 s guard) | — |
-| `ATE` | toggle command echo | — |
-| `AT+VER` | firmware version | — |
-| `AT+HELP` | list commands | — |
-| `AT+AllP` | dump all parameters | — |
-| `AT+EXIT` | leave AT → transparent/data mode | — |
-| `AT+SF` | spreading factor | `7` (range 7–12; higher = more range, slower) |
-| `AT+BW` | bandwidth (kHz) | `125` (125 / 250 / 500) |
-| `AT+CR` | coding rate (FEC) | `1` → 4/5 (1–4 → 4/5…4/8) |
-| `AT+PWR` | TX power (dBm) | `22` |
-| `AT+NETID` | network id (network separator) | `0` |
-| `AT+ADDR` | this node's address | `0` |
-| `AT+TXCH` | TX channel index | `18` |
-| `AT+RXCH` | RX channel index | `18` |
-| `AT+MODE` | operating mode | `1` ⚠️ (transparent vs fixed-point mapping unconfirmed) |
-| `AT+LBT` | listen-before-talk | `0` (set `1` for multi-node) |
-| `AT+RSSI` | append RSSI to received data | `0` |
-| `AT+KEY` | encryption on/off | `1` packet mode / `0` stream mode |
-| `AT+PORT` | vendor "port" grouping | `3` ⚠️ |
-| `AT+COMM` | UART frame format | `"8N1"` |
-| `AT+BAUD` | UART baud | `115200` |
+| Command | Meaning | Ours | Range / notes |
+|---------|---------|------|---------------|
+| `+++` | enter AT mode | — | **CRLF required** (§3) |
+| `AT+EXIT` | leave AT mode, apply settings | — | mandatory |
+| `AT` / `ATE` | ping / toggle echo | — | |
+| `AT+VER` | firmware version | `Ver1.2` | |
+| `AT+HELP` | list commands | — | authoritative command list |
+| `AT+AllP?` | dump all parameters | see below | ⚠️ field order differs from docs |
+| `AT+SF` | spreading factor | `7` | `UINT8`, 7–12; higher = more range, slower |
+| `AT+BW` | bandwidth | `0` | `UINT16`. **An index: 0 = 125 kHz, 1 = 250, 2 = 500** |
+| `AT+CR` | coding rate (FEC) | `1` | `UINT8`, 1–4 → 4/5, 4/6, 4/7, 4/8 |
+| `AT+PWR` | TX power, dBm | `10` | `UINT8`, 10–22 |
+| `AT+NETID` | network id | `0` | `UINT8` → **0–255** |
+| `AT+LBT` | listen-before-talk | `0` | `UINT8`. `1` can delay TX up to 2 s (§4) |
+| `AT+MODE` | operating mode | `1` | `UINT8`. 1 Stream, 2 Packet, 3 Relay |
+| `AT+TXCH` | TX channel | `23` | `UINT8`, 0–80. LF: 410+n MHz |
+| `AT+RXCH` | RX channel | `23` | `UINT8`, 0–80 |
+| `AT+RSSI` | append RSSI to received data | `0` | `INT8`. `1` appends a byte **after your payload** |
+| `AT+ADDR` | node address | `0` | `UINT16`, 0–65535. `0xFFFF` = broadcast/monitor |
+| `AT+PORT` | UART interface type | `1` | `UINT8`. `3` = RS232 on the RS232 DTU; **`1` on the USB stick — leave alone** |
+| `AT+COMM` | UART frame format | `"8N1"` | `STRING` |
+| `AT+BAUD` | UART baud | `115200` | `UINT32`, 1200–115200 |
+| `AT+KEY` | AES key | *(empty)* | `UINT16` **[write-only]** — see below |
+| `AT+RESTORE` | factory reset | — | `UINT8` **[write-only]** |
+| `AT+REBOOT` | software reboot | — | ✅ **undocumented by the vendor**; useful, since DTR/RTS does not reset |
 
-For a point-to-point pair (our test): identical `SF/BW/CR/NETID`, `TXCH=RXCH`,
-`AT+EXIT` into transparent mode → type on one, read on the other.
+### `AT+KEY` is write-only, and is not security ✅
+
+`AT+KEY=?` reports `<ENCRYPT KEY:UINT16[WO]>`, and `AT+KEY?` returns an empty value.
+So the key **cannot be read back or audited** — a push-and-verify configuration flow
+cannot confirm it.
+
+More importantly: the device does offer AES, but keyed by a **16-bit** value —
+roughly 65 000 possibilities. Treat `AT+KEY` as a **network separator**, never as
+confidentiality.
+
+### `AT+AllP?` — do not parse positionally ⚠️
+
+Live response from our sticks:
+
+```
++ALLP=7,0,1,10,0,0,1,23,23,0,0,1,"8N1",115200,0
+      SF BW CR PWR NETID LBT MODE TXCH RXCH RSSI ADDR PORT COMM BAUD KEY
+```
+
+Waveshare documents the same command with **`BAUD` and `COMM` in the opposite
+order**, and with `BW` as `125` rather than as an index. Query parameters
+individually rather than relying on this string.
+
+## 8. Open items
+
+- Whether `AT+BW`'s index form is universal or firmware-version dependent — the
+  shipped `sscom` presets use `AT+BW=125`, which contradicts Ver1.2. ⚠️
+- Actual sensitivity at SF7/BW125 on this hardware (datasheet says ~−123 dBm). ⚠️
+- Behaviour when a logical frame exceeds 240 B and is auto-packetised **with
+  `AT+RSSI=1` enabled** — whether one RSSI byte is appended per LoRa packet or per
+  logical write. Avoided entirely by keeping frames under 240 B. ⚠️
+- Whether `AT+RESTORE=1` also clears the AES key. ⚠️
 
 ---
 
 ## Appendix A — Python test / utility script
 
-Standalone; needs only `pyserial`. Talks to the DTUs through the workbench
-RFC2217 ports. Run with no args for a link + performance demo.
+Standalone; needs only `pyserial`. Talks to the DTUs through the workbench RFC2217
+ports. Run with no args for a link + performance demo.
 
 ```python
 #!/usr/bin/env python3
@@ -198,11 +302,11 @@ RFC2217 ports. Run with no args for a link + performance demo.
 
 Two DTUs in transparent mode: bytes written to one UART come out the other.
 Usage:  python3 lora_dtu.py [host] [portA] [portB]
-        (defaults: 192.168.0.87 4001 4003)
+        (defaults: workbench.local 4001 4003)
 """
 import sys, time, serial
 
-HOST  = sys.argv[1] if len(sys.argv) > 1 else "192.168.0.87"
+HOST  = sys.argv[1] if len(sys.argv) > 1 else "workbench.local"
 PORTA = int(sys.argv[2]) if len(sys.argv) > 2 else 4001
 PORTB = int(sys.argv[3]) if len(sys.argv) > 3 else 4003
 BAUD  = 115200
@@ -291,3 +395,62 @@ if __name__ == "__main__":
     finally:
         a.close(); b.close()
 ```
+
+## Appendix B — Read-only AT probe
+
+Enters AT mode, dumps every parameter, and always exits. Issues **queries only** —
+no setters — so it is safe to run against configured hardware.
+
+```python
+#!/usr/bin/env python3
+"""Read-only AT probe of a LoRa DTU via the workbench RFC2217 port."""
+import sys, time, serial
+
+HOST = "workbench.local"
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 4001
+QUERIES = ["AT+VER", "AT+AllP?", "AT+SF?", "AT+BW?", "AT+CR?", "AT+PWR?",
+           "AT+NETID?", "AT+LBT?", "AT+MODE?", "AT+TXCH?", "AT+RXCH?",
+           "AT+RSSI?", "AT+ADDR?", "AT+PORT?", "AT+BAUD?", "AT+COMM?", "AT+KEY?"]
+
+
+def drain(s, quiet=0.35, hard=3.0):
+    end, buf, last = time.time() + hard, b"", time.time()
+    while time.time() < end:
+        if s.in_waiting:
+            buf += s.read(s.in_waiting); last = time.time()
+        elif buf and time.time() - last > quiet:
+            break
+        else:
+            time.sleep(0.02)
+    return buf
+
+
+def clean(raw):
+    parts = raw.decode("utf-8", "replace").replace("\r", "").split("\n")
+    return " | ".join(p for p in parts if p.strip())
+
+
+s = serial.serial_for_url(f"rfc2217://{HOST}:{PORT}", do_not_open=True)
+s.baudrate, s.timeout, s.dtr, s.rts = 115200, 0.2, False, False
+s.open()
+time.sleep(0.6)
+try:
+    s.reset_input_buffer()
+    s.write(b"+++\r\n"); s.flush()          # CRLF is required -- see section 3
+    if not drain(s).strip():
+        print(f"port {PORT}: could not enter AT mode"); raise SystemExit(1)
+    for q in QUERIES:
+        s.reset_input_buffer()
+        s.write(q.encode() + b"\r\n"); s.flush()
+        print(f"  {q:<12} {clean(drain(s))}")
+finally:
+    s.write(b"AT+EXIT\r\n"); s.flush(); drain(s)   # never leave it in AT mode
+    s.close()
+```
+
+---
+
+## Related
+
+- [[hornethunter-fsd]] — how this link is used: framing, ARQ, addressing
+- [[krakensdr-integration]] — the other half of the station's interfaces

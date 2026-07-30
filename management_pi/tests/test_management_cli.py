@@ -5,7 +5,11 @@ import pytest
 from hornethunter_management import __version__
 from hornethunter_management.cli import fix_from_reports, main
 from hornethunter_shared.geo import LatLon, distance_m, from_local_enu, initial_bearing_deg
-from hornethunter_shared.messages import BearingReport
+from hornethunter_shared.messages import (
+    FLAG_KRAKEN_LINK_UP,
+    FLAG_POSITION_PRESENT,
+    BearingReport,
+)
 
 WEST = LatLon(47.3769, 8.5417)
 EAST = from_local_enu(WEST, 1000.0, 0.0)
@@ -15,12 +19,15 @@ TARGET = from_local_enu(WEST, 500.0, 500.0)
 def report(station: str, at: LatLon, target: LatLon, confidence: float = 0.9) -> BearingReport:
     return BearingReport(
         station_id=station,
-        timestamp=1750000000.0,
-        latitude=at.lat,
-        longitude=at.lon,
+        age_ms=120,
         bearing_deg=initial_bearing_deg(at, target),
         confidence=confidence,
-        frequency_hz=434_000_000,
+        power_dbm=-47.1,
+        config_version=1,
+        config_crc=0xBEEF,
+        flags=FLAG_POSITION_PRESENT | FLAG_KRAKEN_LINK_UP,
+        latitude=at.lat,
+        longitude=at.lon,
     )
 
 

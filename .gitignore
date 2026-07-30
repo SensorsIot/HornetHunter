@@ -20,3 +20,6 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Vendor tooling binaries (the .ini presets are kept; the Windows .exe is not)
+docs/**/*.exe

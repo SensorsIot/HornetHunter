@@ -9,7 +9,8 @@ longitude = 8.5417
 array_heading_deg = 0.0
 
 [radio]
-frequency_hz = 434_000_000
+# Tag transmitter frequency. Must match the KrakenSDR's `center_freq`.
+frequency_hz = 148_524_000
 sample_rate_hz = 2_400_000
 
 [krakensdr]
