@@ -16,6 +16,9 @@ known-first-party = ["hornethunter_shared", "hornethunter_kraken", "hornethunter
 [tool.mypy]
 python_version = "3.11"
 strict = true
+# Resolve the three packages from source so shared's types (it ships py.typed)
+# are seen by the targets that import it, without relying on the editable install.
+mypy_path = ["shared/src", "kraken_pi/src", "management_pi/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["shared/tests", "kraken_pi/tests", "management_pi/tests"]

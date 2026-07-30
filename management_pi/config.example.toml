@@ -1,17 +1,57 @@
 # Management Pi config. Copy to /etc/hornethunter/management.toml and edit.
+# Tunables and their defaults are catalogued in the FSD (§19.2, Appendix C).
 
 [server]
-listen = "0.0.0.0"
+# The UI binds here; default to the local network, never a public interface
+# (NFR-22.3).
+listen = "192.168.50.1"
 port = 8000
 
-[fusion]
-# Reports older than this are dropped before triangulating.
-report_ttl_s = 10.0
-# Minimum station confidence to admit a bearing into a fix.
-min_confidence = 0.3
-# Minimum number of stations required for a fix.
-min_stations = 2
+[carrier]
+# LoRa DTU device node, addressed by stable identity (NFR-15.3).
+serial_url = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXX-if00"
+promote_probes = 3
+demote_probes = 2
+dwell_s = 30.0
 
-[stations]
-# Expected station IDs, for "station offline" reporting.
-expected = ["kraken-01", "kraken-02"]
+[cycle]
+period_ms = 1000
+guard_ms = 40
+slot_ms = 150
+
+[arq]
+timeout_ms = 400
+max_attempts = 3
+
+[health]
+window_cycles = 20
+retry_rate_threshold = 0.20
+stale_cycles = 5
+
+[link]
+# Append RSSI to received frames (display only, NFR-8.1; affects framing, FR-10.4).
+rssi_append = false
+
+[log]
+path = "/var/log/hornethunter/management.jsonl"
+
+[mirror]
+# Per-station configuration mirror, persisted across restarts (FR-7.9).
+path = "/var/lib/hornethunter/mirror.json"
+
+# One [[station]] table per station. `address` is the HH-Link address (§18.2);
+# `slot_index` is its fixed reply slot (FR-5.2). `reference_lat`/`reference_lon`
+# are the per-station reference for decimetre position offsets (§9.4).
+[[station]]
+address = 1
+name = "kraken-01"
+slot_index = 0
+reference_lat = 47.3769
+reference_lon = 8.5417
+
+[[station]]
+address = 2
+name = "kraken-02"
+slot_index = 1
+reference_lat = 47.3769
+reference_lon = 8.5417

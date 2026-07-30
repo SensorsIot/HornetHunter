@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "HornetHunter aggregator for the Management Pi"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["hornethunter-shared"]
+dependencies = ["hornethunter-shared", "flask", "flask-sock"]
 
 [project.scripts]
 hornethunter-management = "hornethunter_management.cli:main"

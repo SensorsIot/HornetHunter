@@ -14,16 +14,12 @@ KrakenSDR, measure a direction of arrival (DoA) to a tagged hornet. A Management
 Pi collects those bearings, displays them live, and distributes KrakenSDR
 configuration to the stations.
 
-**v1 is a test platform**, not an operational product. Its purpose is to prove two
-things work and to make their behaviour measurable:
+v1 provides two capabilities and makes their behaviour measurable:
 
 1. the **data link** between the Management Pi and the stations, including its
    reliability mechanism and its health reporting;
 2. the **interface to the KrakenSDR software** — reading bearings out of it and
    pushing configuration into it.
-
-Everything else is deliberately minimal so that failures in those two subsystems
-are unambiguous.
 
 ### 1.2 Scope
 
@@ -34,7 +30,7 @@ are unambiguous.
 - Automatic selection between the WLAN and LoRa carriers.
 - Reading DoA measurements from the KrakenSDR software.
 - Distributing the KrakenSDR configuration set to stations, and detecting when a
-  station's configuration diverges from what the Management Pi believes it holds.
+  station's configuration diverges from what the Management Pi holds for it.
 - A numeric management interface and a structured debugging log.
 
 **Out of scope — operator-owned**
@@ -42,11 +38,11 @@ are unambiguous.
 - **All RF engineering.** Frequency selection and planning, antenna array geometry
   and spacing, array orientation and heading calibration, transmit power, link
   budget, range, band selection, and regulatory compliance are decided and
-  performed manually by the operator, who is the domain specialist.
-- The spec treats radio parameters as **values the software applies**, never as
-  values the software chooses or validates for physical correctness. The system
-  shall apply whatever the operator configures.
-- Triangulation of bearings into a position fix — deferred to v2 (§3.3).
+  performed manually by the operator.
+- Radio parameters are **values the software applies**, not values the software
+  chooses or validates for physical correctness. The system shall apply whatever
+  the operator configures.
+- Triangulation of bearings into a position fix — v2 (§3.3).
 
 ### 1.3 Users
 
@@ -55,18 +51,18 @@ are unambiguous.
 | Operator | Runs the hunt. Uses the management UI to set KrakenSDR parameters and watch bearings and link health. |
 | Developer | Uses the debugging log and the bench harness to characterise the link and the Kraken interface. |
 
-In v1 these are the same person; the system is optimised for that.
+In v1 these are the same person.
 
 ### 1.4 Goals and non-goals
 
 **Goals**
 
 - G1 — Deliver bearings from both stations to the Management Pi continuously, with
-  loss made visible rather than hidden.
-- G2 — Distribute configuration to stations efficiently, and make configuration
-  divergence detectable.
+  loss made visible.
+- G2 — Distribute configuration to stations, and make configuration divergence
+  detectable.
 - G3 — Make the link's condition legible at a glance and auditable after the fact.
-- G4 — Run identically over WLAN and LoRa, so bench work exercises the field path.
+- G4 — Run identically over WLAN and LoRa.
 
 **Non-goals**
 
@@ -99,9 +95,8 @@ In v1 these are the same person; the system is optimised for that.
 
 ### 2.1 Logical architecture
 
-The Management Pi is the **master**. It owns the schedule: nothing transmits on the
-LoRa medium unless the master invited it. This removes the need for collision
-avoidance on a medium that provides none.
+The Management Pi is the **master** and owns the schedule. Nothing transmits on the
+LoRa medium unless the master invited it.
 
 One cycle:
 
@@ -110,28 +105,38 @@ One cycle:
 3. Configuration deltas, when pending, are sent between cycles and explicitly
    acknowledged.
 
-Stations never initiate. They are also mutually deaf by construction (§18.2), so no
-station can be confused by another's traffic.
+Stations never initiate, and are mutually deaf by construction (§18.2).
 
 ### 2.2 Hardware / platform architecture
 
 | Node | Hardware | Attached |
 |------|----------|----------|
-| Management Pi | Raspberry Pi | LoRa DTU (USB), WLAN |
-| Kraken Pi × 2 | Raspberry Pi | KrakenSDR (USB), LoRa DTU (USB), WLAN |
+| Management Pi | Raspberry Pi (`HornetManager`) | LoRa DTU (USB), `eth0` uplink, `wlan0` access point |
+| Kraken Pi × 2 | Raspberry Pi | KrakenSDR (USB), LoRa DTU (USB), u-blox GNSS (USB), `wlan0`, `eth0` (wired management) |
 
 Both carriers may be physically up at once. The LoRa DTUs are USB dongles
 presenting a serial port; on the development bench they are reached over the
 Universal Embedded Workbench as RFC2217 network serial ports, and on a Pi as a
 local device node. The software treats both identically (§16).
 
-Station count is a configuration property, not a structural assumption. The
-addressing scheme (§18) and the slotted cycle (§5) accommodate additional stations
-without protocol change.
+**WLAN topology.** The Management Pi runs a `wlan0` access point on the
+`192.168.50.0/24` subnet with its `eth0` as the uplink; the reproducible AP
+configuration is §17.4. Stations associate to that access point when co-located,
+receiving a `192.168.50.x` lease; this is the WLAN carrier. When stations are not
+associated, the LoRa carrier is used. Each station also exposes a wired `eth0`
+management path independent of `wlan0`.
+
+**DTU device node.** The LoRa DTU is addressed by its `/dev/serial/by-id/` path
+(`usb-1a86_USB_Single_Serial_<serial>-if00`), not a `ttyACM` index. The u-blox GNSS
+receiver shares the `ttyACM` namespace and enumeration order is not stable across
+boots (NFR-15.3).
+
+Station count is a configuration property. The addressing scheme (§18) and the
+slotted cycle (§5) accommodate additional stations without protocol change.
 
 ### 2.3 Software architecture
 
-Three Python packages, already scaffolded in this repository:
+Three Python packages in this repository:
 
 | Package | Runs on | Role |
 |---------|---------|------|
@@ -140,7 +145,7 @@ Three Python packages, already scaffolded in this repository:
 | `hornethunter_management` | Management Pi | master, UI, log aggregation |
 
 Each Pi runs one long-lived systemd service. Configuration lives outside the
-repository in `/etc/hornethunter/` so that updates cannot overwrite it.
+repository in `/etc/hornethunter/`.
 
 **Persistence.** The Management Pi persists a per-station configuration mirror and
 the previous known-good snapshot to disk (§7.6). Both nodes append structured logs
@@ -148,13 +153,12 @@ to local rotating files (§20). Nothing else is persisted in v1.
 
 **A station agent shall not depend on the health of its KrakenSDR software.** It is
 a separate process; it continues to answer polls and accept configuration pushes
-when the DSP is stopped, wedged, or misconfigured. This is what makes every
-KrakenSDR setting safe to expose (§13.4).
+when the DSP is stopped, wedged, or misconfigured (§13.4).
 
 ### 2.4 Component layering
 
 Strict one-way dependency: **L0 Foundation → L1 Interfaces → L2 Application
-logic**. The L0/L1 line is ownership — did we implement and test the protocol?
+logic**. The L0/L1 line is ownership — whether the protocol is implemented here.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -165,7 +169,7 @@ logic**. The L0/L1 line is ownership — did we implement and test the protocol?
 │  │   §5       │ │    §6     │ │     §7       │ │   §8      │ │    §9      │  │
 │  └────────────┘ └───────────┘ └──────────────┘ └───────────┘ └────────────┘  │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│ L1  Interfaces (we own the wire logic)                                       │
+│ L1  Interfaces (wire logic implemented here)                                 │
 │  ┌────────────┐ ┌───────────┐ ┌──────────────┐ ┌───────────┐ ┌────────────┐  │
 │  │  HH-Link   │ │ DTU AT    │ │ Kraken DoA   │ │  Kraken   │ │ Management │  │
 │  │ Frame+ARQ  │ │ Provision │ │   Source     │ │  Settings │ │  UI        │  │
@@ -181,12 +185,12 @@ logic**. The L0/L1 line is ownership — did we implement and test the protocol?
 ```
 
 **Source layout mirrors the layers.** Each component is its own module; an
-interface is never folded into the consumer that uses it. Lower layers never import
-higher ones — where a foundation component must notify upward, it does so through a
-callback registered at the composition root (the service entry point). Each L1
-interface's pure core — frame encode/decode, CRC, delta computation, canonical
-encoding, state-machine transitions — is extracted as free functions taking plain
-data, so it is testable at the fast tier with no hardware and no I/O (§24.1).
+interface is never folded into its consumer. Lower layers never import higher ones;
+where a foundation component notifies upward, it does so through a callback
+registered at the composition root (the service entry point). Each L1 interface's
+pure core — frame encode/decode, CRC, delta computation, canonical encoding,
+state-machine transitions — is a set of free functions taking plain data, testable
+at the fast tier with no hardware and no I/O (§24.1).
 
 ---
 
@@ -194,17 +198,17 @@ data, so it is testable at the fast tier with no hardware and no I/O (§24.1).
 
 ### 3.1 Phase 1 — Link foundation
 
-**Scope.** The wire contract and its reliability, provable without any radio.
+**Scope.** The wire contract and its reliability, without any radio.
 
 **Deliverables**
 
 - `hornethunter_shared`: frame codec (§10.2), CRC, field registry (§7.2),
-  canonical config encoding (§7.4), revised bearing record (§9.3).
+  canonical config encoding (§7.4), bearing record (§9.3).
 - ARQ state machine (§10.5) and the byte-carrier abstraction (§15.2).
 - Loopback and in-process link simulator; host-tier test suite.
 
 **Exit criteria.** Frame codec round-trips all message types including
-fragmentation; ARQ recovers from injected loss at 0/10/50 % rates; entire suite
+fragmentation; ARQ recovers from injected loss at 0/10/50 % rates; the entire suite
 runs with no hardware attached.
 
 ### 3.2 Phase 2 — Real link and real Kraken
@@ -221,8 +225,8 @@ runs with no hardware attached.
 
 **Exit criteria.** Both stations poll continuously over LoRa on the bench for one
 hour with health reported and no unexplained gaps; a parameter change reaches a
-station and is confirmed by read-back; a deliberately corrupted station
-configuration raises `CONFIG_DIVERGED` and is repaired by one automatic full push.
+station and is confirmed by read-back; a corrupted station configuration raises
+`CONFIG_DIVERGED` and is repaired by one automatic full push.
 
 ### 3.3 Phase 3+ — Deferred
 
@@ -236,33 +240,22 @@ configuration raises `CONFIG_DIVERGED` and is repaired by one automatic full pus
 
 ---
 
-## 4. Risks, Assumptions & Dependencies
+## 4. Assumptions & Dependencies
 
-### 4.1 Risks
+### 4.1 Assumptions
 
-| ID | Risk | Likelihood | Impact | Mitigation |
-|----|------|-----------|--------|------------|
-| R1 | The link degrades in the field in ways the bench cannot reproduce, because bench link margin is unrepresentative. | High | Medium | Health metrics are retry-based and logged per frame (§8, §20); field tier is a distinct test tier (§24.1). |
-| R2 | A station's configuration silently differs from what the Management Pi believes, producing wrong bearings that look valid. | Medium | **High** | Config version + canonical CRC echoed in every bearing, computed from KrakenSDR read-back (§7.5). |
-| R3 | `krakensdr_doa` is a moving upstream target, and **the deployed stations already differ from upstream**: the documented `8042/settings` route returns 404, and the live settings schema has 158 fields against upstream's 52. | **Confirmed** | Medium | All coupling isolated in §12 and §13; two write routes behind one contract (FR-13.5); field registry generated from a live station, not from upstream's sample (§7.3); simulator backend for regression. |
-| R4 | Transparent-mode packetisation splits or coalesces our frames unpredictably. | High | Medium | Self-delimiting frames: sync word, length, CRC (§10.2); resynchronisation on garbage (§10.6). |
-| R5 | Automatic carrier failover makes a measurement ambiguous about which carrier produced it. | Medium | Medium | Carrier stamped on every record and log line; health window resets on switch; manual carrier pin (§6.5). |
-| R6 | Operator exposes every KrakenSDR setting and breaks a station's DSP. | Medium | Low | Station agent independent of DSP health (§2.3); revert-to-last-known-good (§7.6). |
-
-### 4.2 Assumptions
-
-- A1 — Two stations in v1, extensible by configuration. *(assumed)*
-- A2 — The operator sets all radio and array parameters manually and correctly;
-  the software does not validate them for physical plausibility (§1.2).
+- A1 — Two stations in v1, extensible by configuration.
+- A2 — The operator sets all radio and array parameters manually; the software does
+  not validate them for physical plausibility (§1.2).
 - A3 — Station array **heading is fixed at 0°** by manual alignment and is not
   transmitted (§9.4).
-- A4 — Station position is supplied by the KrakenSDR feed and may change; it is
-  transmitted only when it changes (§9.4). *(assumed for encoding purposes)*
+- A4 — Station position is supplied by the KrakenSDR feed, may change, and is
+  transmitted only when it changes (§9.4).
 - A5 — No internet at runtime. All UI assets are served locally (§14.2).
-- A6 — `AT+KEY` is used, if at all, as a network separator and **not** as a
-  security control (§22.2).
+- A6 — `AT+KEY`, if used, is a network separator and **not** a security control
+  (§22.2).
 
-### 4.3 Dependencies
+### 4.2 Dependencies
 
 | Dependency | Used for | Notes |
 |------------|----------|-------|
@@ -289,13 +282,12 @@ a slot missed.
   the broadcast address, inviting all configured stations simultaneously.
 - **FR-5.2** [Must] Each station shall be assigned a fixed reply slot index, and
   shall transmit its BEARING only within that slot.
-- **FR-5.3** [Must] The cycle period shall be configurable. The scheduler shall
+- **FR-5.3** [Must] The cycle period shall be configurable, and the scheduler shall
   apply the configured period without imposing a policy limit of its own (§1.2).
 - **FR-5.4** [Must] A slot with no valid BEARING by its deadline shall be recorded
   as a missed slot for that station and reported to §8.
 - **FR-5.5** [Should] When a station misses its slot, the scheduler shall retry
-  that station with a **unicast** POLL rather than re-broadcasting, so one
-  station's loss does not disturb the other.
+  that station with a **unicast** POLL rather than re-broadcasting.
 - **NFR-5.1** [Must] Cycle timing jitter shall be logged; the scheduler shall not
   silently drift.
 
@@ -309,10 +301,9 @@ t=T     next cycle
 ```
 
 `g` is a guard interval after the POLL, `s` the slot width, `T` the cycle period —
-all configuration (§19). Slot width must exceed the airtime of a maximum-size
-BEARING frame plus the station's turnaround time; because stations cannot hear each
-other they cannot detect a collision, so slots are sized conservatively rather than
-sensed. Measured airtimes for sizing are in Appendix B.
+all configuration (§19). Slot width shall exceed the airtime of a maximum-size
+BEARING frame plus the station's turnaround time. Measured airtimes for sizing are
+in Appendix B.
 
 ### 5.4 Failure modes
 
@@ -329,9 +320,7 @@ sensed. Measured airtimes for sizing are in Appendix B.
 
 ### 6.1 Purpose and scope
 
-Chooses the carrier — WLAN or LoRa — **independently for each station**. A single
-global carrier mode would be wrong the moment one station is walked out of WLAN
-range while the other stays in it.
+Chooses the carrier — WLAN or LoRa — **independently for each station**.
 
 ### 6.2 Requirements
 
@@ -353,37 +342,28 @@ range while the other stays in it.
 
 ### 6.3 Defaults
 
-| Parameter | Default | Rationale |
-|-----------|---------|-----------|
-| probe interval | 5 s | cheap; a heartbeat, not a transfer |
-| probe timeout | 1 s | a WLAN that does not answer in 1 s is not usable |
-| `promote_probes` | 3 | reluctant promotion; a station at the edge of range must not flap |
-| `demote_probes` | 2 | prompt demotion; a dead carrier stalls polling |
-| `dwell_s` | 30 | flap damping; every flap resets the health window (§8.4) |
-
-Asymmetry is deliberate: the cost of being slow to promote is a lower data rate,
-while the cost of being slow to demote is no data at all.
+| Parameter | Default |
+|-----------|---------|
+| probe interval | 5 s |
+| probe timeout | 1 s |
+| `promote_probes` | 3 |
+| `demote_probes` | 2 |
+| `dwell_s` | 30 |
 
 ### 6.4 Behaviour on switch
 
-Because both carriers run the identical frame protocol (§10), a switch changes only
-the byte carrier. The codec, the ARQ state machine and the message set are
-unchanged; over WLAN, acknowledgements simply return in microseconds instead of
-milliseconds.
+Both carriers run the identical frame protocol (§10), so a switch changes only the
+byte carrier; the codec, the ARQ state machine and the message set are unchanged.
 
-Two consequences must be handled, not ignored:
-
-- The health window **resets** on any carrier change (§8.4). A window spanning a
-  switch would blend statistics from two carriers into a number describing neither.
-- The achievable cycle rate differs per carrier. The scheduler may use a different
-  configured period per carrier; a visible change of update rate on switch is
-  expected behaviour, and is logged.
+- The health window **resets** on any carrier change (§8.4).
+- The configured cycle period may differ per carrier; a change of update rate on
+  switch is logged.
 
 ### 6.5 Failure modes
 
 | Condition | Behaviour |
 |-----------|-----------|
-| Both carriers down | Station enters `LOST` (§8.3); polling continues on LoRa so recovery is self-healing |
+| Both carriers down | Station enters `LOST` (§8.3); polling continues on LoRa |
 | WLAN reachable but station process dead | Probes fail → demote to LoRa → also fails → `LOST`. Distinguished in the log by probe-vs-frame failure |
 | Carrier pinned and that carrier fails | No automatic fallback; station goes `LOST` and the UI states that a pin is in force |
 
@@ -393,30 +373,31 @@ Two consequences must be handled, not ignored:
 
 ### 7.1 Purpose and scope
 
-Delivers the KrakenSDR configuration set from the Management Pi to the stations,
-and continuously proves that a station holds what the Management Pi believes it
-holds. This chapter owns the delta mechanism, the canonical CRC, and the divergence
-response.
+Delivers the KrakenSDR configuration set from the Management Pi to the stations, and
+continuously verifies that a station holds what the Management Pi holds for it. This
+chapter owns the delta mechanism, the canonical CRC, and the divergence response.
 
 ### 7.2 Requirements
 
-- **FR-7.1** [Must] Configuration changes shall be transmitted as **deltas** —
-  only the fields that changed.
+- **FR-7.1** [Must] Configuration changes shall be transmitted as **deltas** — only
+  the fields that changed.
 - **FR-7.2** [Must] Every field shall have a stable numeric identifier and a
   declared type, held in a shared **field registry** in `hornethunter_shared`.
 - **FR-7.3** [Must] The Management Pi shall maintain a `config_version` per station,
   incremented on every accepted change.
 - **FR-7.4** [Must] A **canonical CRC** over the operator-owned configuration shall
   be computed identically on both nodes (§7.4).
-- **FR-7.5** [Must] Each station shall compute its CRC from the configuration
-  **read back from the KrakenSDR software**, not from the delta it was asked to
-  apply (§7.5).
+- **FR-7.5** [Must] Each station shall compute its CRC from the configuration **read
+  back from the KrakenSDR software**, not from the delta it was asked to apply
+  (§7.5).
 - **FR-7.6** [Must] Every BEARING record shall carry the station's `config_version`
   and CRC.
-- **FR-7.7** [Must] On a version or CRC mismatch the Management Pi shall raise
+- **FR-7.7** [Must] On a canonical-CRC mismatch the Management Pi shall raise
   `CONFIG_DIVERGED`, perform **exactly one** automatic full-set push, and set a
   sticky "resynced" marker on that station. If the mismatch persists after that
-  push, it shall stop and require operator action.
+  push, it shall stop and require operator action. The CRC is the authoritative
+  end-to-end check; `config_version` is the Management Pi's own mirror counter and
+  the station's held version, not a value echoed across the link.
 - **FR-7.8** [Must] The operator shall be able to request a full-set read from a
   station, and a full-set push to a station, as explicit manual operations.
 - **FR-7.9** [Must] The Management Pi shall persist its per-station configuration
@@ -428,11 +409,9 @@ response.
 ### 7.3 Field registry
 
 The registry is data, not code: one entry per KrakenSDR settings key. It shall be
-**generated from a live station's settings**, not from upstream's sample file — a
-live station carries **158 fields** against the sample's 52, including four
-additional per-VFO families (`vfo_demod_N`, `vfo_iq_N`, `vfo_squelch_mode_N`,
-`vfo_fir_order_factor_N`) and `doa_decorrelation_method`, which has superseded
-`en_fbavg`.
+**generated from a live station's settings**. A live station carries **158 fields**,
+including four per-VFO families (`vfo_demod_N`, `vfo_iq_N`, `vfo_squelch_mode_N`,
+`vfo_fir_order_factor_N`) and `doa_decorrelation_method`; `en_fbavg` is absent.
 
 | Column | Meaning |
 |--------|---------|
@@ -443,27 +422,23 @@ additional per-VFO families (`vfo_demod_N`, `vfo_iq_N`, `vfo_squelch_mode_N`,
 | `crc_covered` | whether it participates in the canonical CRC (§7.4) |
 | `restart_hint` | informational only; the KrakenSDR applies changes live (§13.3) |
 
-A delta entry on the wire costs `1 B id + 1..4 B value` for scalars, so a typical
-three-field change is ~20 bytes — one frame, satisfying NFR-7.1.
+A delta entry on the wire costs `1 B id + 1..4 B value` for scalars; a typical
+three-field change is ~20 bytes — one frame (NFR-7.1).
 
 ### 7.4 Canonical CRC
 
-**The CRC shall not be computed over the `settings.json` file bytes.** The
-KrakenSDR software rewrites that file itself, and float re-serialisation is not
-byte-stable — the same logical value can be written differently on different
-passes. A byte-level CRC would report continuous false mismatches.
-
-Instead:
+The CRC is computed over canonically encoded field values, **not over the
+`settings.json` file bytes** (the KrakenSDR software rewrites that file and float
+re-serialisation is not byte-stable).
 
 1. Take every registry entry with `crc_covered = true`, in ascending `id` order.
 2. Encode each value in its declared fixed-width binary form; real values via their
-   declared integer `scale`, so representation is exact and identical on both nodes.
+   declared integer `scale`, so representation is identical on both nodes.
 3. CRC-16/CCITT-FALSE over that byte sequence.
 
-**Excluded from `crc_covered`:** any field the KrakenSDR software mutates on its
-own — live position and heading when position is GPS-sourced, plus bookkeeping
-(`ext_upd_flag`, `timestamp`). Including them would make the CRC change
-continuously and never match.
+**Excluded from `crc_covered`:** any field the KrakenSDR software mutates on its own
+— live position and heading when position is GPS-sourced, plus bookkeeping
+(`ext_upd_flag`, `timestamp`).
 
 ### 7.5 Divergence detection
 
@@ -480,21 +455,17 @@ management                                     station
    │◄──── BEARING(version, crc) ──── every cycle ──│   continuous re-verification
 ```
 
-Computing the CRC from the read-back rather than from the applied delta makes the
-check genuinely end-to-end: it catches the KrakenSDR clamping a value, rejecting
-it, or its settings watcher never observing the write — not merely that the frame
-arrived intact.
-
-Because the CRC rides on every bearing, divergence is detected continuously, not
-only at push time. A station whose configuration is changed locally — by someone
-using its own web UI — is detected within one cycle.
+The CRC is computed from the read-back, so the check catches the KrakenSDR clamping
+a value, rejecting it, or its settings watcher never observing the write. The CRC
+rides on every bearing, so a station whose configuration is changed locally is
+detected within one cycle.
 
 ### 7.6 Revert and recovery
 
 The Management Pi retains the previous accepted configuration snapshot per station.
-Combined with the station agent's independence from DSP health (§2.3), this makes
-every exposed setting recoverable: a setting that breaks the KrakenSDR does not
-break the command channel that can undo it.
+With the station agent's independence from DSP health (§2.3), every exposed setting
+is recoverable: a setting that breaks the KrakenSDR does not break the command
+channel that undoes it.
 
 ### 7.7 Failure modes
 
@@ -512,12 +483,11 @@ break the command channel that can undo it.
 
 ### 8.1 Purpose and scope
 
-Converts link behaviour into a single per-station indicator the operator can read
-at a glance, and into metrics the developer can audit afterwards.
+Converts link behaviour into a single per-station indicator and into metrics for
+later audit.
 
 **Health is derived from retransmission behaviour only.** Signal strength is
-displayed as information but does not contribute to the indicator: retries measure
-delivery, which is what matters, whereas RSSI measures a proxy for it.
+displayed as information but does not contribute to the indicator.
 
 ### 8.2 Requirements
 
@@ -545,15 +515,13 @@ delivery, which is what matters, whereas RSSI measures a proxy for it.
 | State | Condition | Meaning |
 |-------|-----------|---------|
 | 🟢 `GREEN` | zero retransmissions in window | delivering first-try |
-| 🟠 `ORANGE` | retries present, all cycles delivered, rate ≤ threshold | degraded, still working — **this is the early warning** |
+| 🟠 `ORANGE` | retries present, all cycles delivered, rate ≤ threshold | degraded, still working |
 | 🔴 `RED` | ARQ exhausted, or rate > threshold, or `stale_cycles` consecutive misses | operator action required |
 | ⚫ `LOST` | no traffic on either carrier | terminal case of `RED`; §6.5 |
 | 🟣 `CONFIG_DIVERGED` | version/CRC mismatch | independent axis; wrong-data fault, not a link fault |
 
-`ORANGE` is what makes the design's central reliability requirement testable —
-*no station shall enter `ORANGE` during normal operation.* A binary up/down
-indicator could not express that: a link succeeding only on its third attempt every
-cycle is one step from failure yet would read healthy.
+The reliability requirement is: *no station shall enter `ORANGE` during normal
+operation.*
 
 ### 8.4 Defaults
 
@@ -563,15 +531,14 @@ cycle is one step from failure yet would read healthy.
 | `retry_rate_threshold` | 20 % (more than 4 of 20 cycles needing a retransmission) |
 | `stale_cycles` | 5 |
 
-These are starting values expected to be retuned after field use; both are runtime
-configuration (NFR-8.2).
+Thresholds and window length are runtime configuration (NFR-8.2).
 
 ### 8.5 Failure modes
 
 | Condition | Behaviour |
 |-----------|-----------|
 | Window not yet full after start or reset | State reported as `GREEN` with an explicit `warming_up` qualifier; thresholds not applied until the window fills |
-| Station on WLAN | Retries are near-zero by nature, so health reads `GREEN` regardless of RF conditions. The indicator is therefore **always displayed with its carrier** (FR-6.6); `GREEN` on WLAN makes no claim about the LoRa link |
+| Station on WLAN | Retries are near-zero, so health reads `GREEN` regardless of RF conditions. The indicator is **always displayed with its carrier** (FR-6.6); `GREEN` on WLAN makes no claim about the LoRa link |
 
 ---
 
@@ -591,7 +558,7 @@ record transmitted once per cycle.
 - **FR-9.3** [Must] Each record shall carry the measurement's **age in
   milliseconds** at the moment of transmission.
 - **FR-9.4** [Must] The station shall report how many measurements were produced
-  and discarded since the previous poll, so decimation is visible.
+  and discarded since the previous poll.
 - **FR-9.5** [Must] Station position shall be transmitted **only when it has
   changed** beyond `position_epsilon` since the last transmitted position.
 - **FR-9.6** [Must] Records shall indicate whether the KrakenSDR feed is live, and
@@ -604,7 +571,7 @@ record transmitted once per cycle.
 |-------|------|------:|-------|
 | `flags` | `u8` | 1 | see below |
 | `bearing_cdeg` | `u16` | 2 | centi-degrees, 0..35999 |
-| `confidence` | `u8` | 1 | quantised from the feed's `conf` |
+| `confidence` | `u8` | 1 | quantised from the feed's `conf` (§9.4) |
 | `power_dbm` | `i8` | 1 | from the feed's `power` |
 | `age_ms` | `u16` | 2 | measurement age at transmission (FR-9.3) |
 | `config_version` | `u8` | 1 | §7.6 |
@@ -614,37 +581,39 @@ record transmitted once per cycle.
 **10 bytes** normally, 14 with position. Flags: position-present, position-source,
 kraken-link-up, squelch-open, adc-overdrive, no-data, reserved ×2.
 
-`adc_overdrive` and `squelch_open` come from the feed and are carried because they
-explain a suspicious bearing; the receiver interprets them, the station does not
-act on them.
+The feed's `conf` is **not normalised to 0..1** (values above 100 are observed, e.g.
+159); the station quantises it into `confidence` `u8` by clamping. `adc_overdrive`
+and `squelch_open` come from the feed and are carried so the receiver can interpret
+a suspicious bearing; the station does not act on them.
+
+**`age_ms` floor.** The feed reports a measurement `latency` and `processing_time`
+totalling ~0.4–0.6 s, so `age_ms` has a floor near half a second even for the
+newest measurement.
 
 ### 9.4 Position and heading
 
-- **Position** is taken from the KrakenSDR feed and may change, so it is
-  transmitted on change (FR-9.5) against a per-station reference position, in
-  decimetres. Re-basing the reference is a §7 configuration operation.
-- **Heading** is a fixed 0° by manual array alignment (A3) and is therefore **not
-  transmitted at all** in v1.
+- **Position** is taken from the KrakenSDR feed, may change, and is transmitted on
+  change (FR-9.5) against a per-station reference position, in decimetres.
+  Stationary GPS position jitter of ~3–4 m is observed, so `position_epsilon_dm`
+  defaults to 50 (5 m). Re-basing the reference is a §7 configuration operation.
+- **Heading** is a fixed 0° by manual array alignment (A3) and is **not transmitted**
+  in v1.
 
-The residual risk is recorded rather than mitigated in software: a station whose
-array is physically rotated away from its assumed heading produces bearings wrong
-by that angle, silently, and no link or confidence metric will reveal it. Alignment
+A station whose array is physically rotated away from its assumed heading produces
+bearings wrong by that angle, and no link or confidence metric reveals it. Alignment
 and its verification are operator responsibilities (§1.2, §23.2).
 
 ### 9.5 No clocks
 
-Because v1 produces no position fix, no cross-station time alignment is required.
-Records carry **age**, not an absolute timestamp; the Management Pi converts to
-absolute time on arrival using its own clock. No clock synchronisation of any kind
-exists in v1, and none is needed.
+v1 produces no position fix, so no cross-station time alignment is required. Records
+carry **age**, not an absolute timestamp; the Management Pi converts to absolute
+time on arrival using its own clock. No clock synchronisation exists in v1.
 
 ### 9.6 Deferred: fixes
 
 `hornethunter_shared.geo.triangulate()` and `intersect_bearings()` are implemented
 and unit-tested, and `management_pi` exposes a `--fix-from` entry point. These are
-**v2 seams, retained deliberately and unused in v1**. Note that
-`README.md` currently describes the Management Pi as triangulating fixes; that
-describes v2, not v1.
+**v2 seams, unused in v1**.
 
 ### 9.7 Failure modes
 
@@ -664,16 +633,15 @@ describes v2, not v1.
 
 ### 10.1 Purpose and peer
 
-The protocol between the Management Pi and the stations. Its peer is another
-HH-Link endpoint. **One frame format runs over both carriers** — LoRa serial and
-WLAN TCP — so that bench work over WLAN exercises the same codec and the same
-reliability logic that must work in the field.
+The protocol between the Management Pi and the stations. Its peer is another HH-Link
+endpoint. **One frame format runs over both carriers** — LoRa serial and WLAN TCP.
+JSON is used in logs and tests; it is never the wire form.
 
 ### 10.2 Frame format
 
 The LoRa carrier is a transparent byte pipe with **no frame boundaries**: the DTU
-packetises on UART idle gaps, so one write may arrive split or coalesced (R4).
-Frames are therefore self-delimiting.
+packetises on UART idle gaps, so one write may arrive split or coalesced. Frames are
+self-delimiting.
 
 ```
 ┌────────┬─────────┬──────┬─────┬─────┬─────┬───────────┬───────┐
@@ -685,14 +653,12 @@ Frames are therefore self-delimiting.
 ```
 
 - **9 bytes** of overhead. Payload capped at **200 B**, so a frame never exceeds
-  209 B and always fits a single DTU packet (Appendix A), avoiding fragmentation at
-  the carrier level.
-- **The DTU appends an RSSI byte after our CRC** when RSSI reporting is enabled
-  (§11.3). The receiver **shall strip that trailing byte before validating the
-  CRC**, not after. This is the single easiest thing to get wrong in the codec.
-- CRC-16/CCITT-FALSE. The LoRa PHY already guarantees integrity (§15.3); this CRC
-  guards against framing errors — mis-synchronisation, truncation, coalescing —
-  not channel corruption.
+  209 B and always fits a single DTU packet (Appendix A).
+- **The DTU appends an RSSI byte after the CRC** when RSSI reporting is enabled
+  (§11.3). The receiver shall strip that trailing byte **before** validating the CRC.
+- CRC-16/CCITT-FALSE, over VER..PAYLOAD. The LoRa PHY guarantees integrity (§15.3);
+  this CRC guards against framing errors — mis-synchronisation, truncation,
+  coalescing.
 
 ### 10.3 Message types
 
@@ -723,35 +689,25 @@ Fragmented types carry `frag_index` and `frag_total` at the head of the payload.
   partially interpreted.
 - **FR-10.6** [Must] `PARAM_FULL` and `PARAM_REPORT` shall support fragmentation
   with per-fragment acknowledgement.
-- **FR-10.7** [Must] Duplicate frames — a retransmission whose ACK was lost —
-  shall be detected by sequence number, acknowledged again, and **applied only
-  once**.
+- **FR-10.7** [Must] Duplicate frames — a retransmission whose ACK was lost — shall
+  be detected by sequence number, acknowledged again, and **applied only once**.
 - **NFR-10.1** [Must] The codec shall be a pure function of bytes, independent of
-  carrier and of wall-clock time, so it is testable at the fast tier.
+  carrier and of wall-clock time.
 
 ### 10.5 ARQ
 
 **Stop-and-wait**, one outstanding frame per direction per station.
 
-| Parameter | Default | Basis |
-|-----------|---------|-------|
-| retransmission timeout | 400 ms | comfortably above measured round-trip for a small frame (Appendix B) |
-| maximum attempts | 3 | original plus two retransmissions |
-| sequence space | `u8`, wrapping | ample for stop-and-wait |
+| Parameter | Default |
+|-----------|---------|
+| retransmission timeout | 400 ms |
+| maximum attempts | 3 (original plus two retransmissions) |
+| sequence space | `u8`, wrapping |
 
-Rationale for stop-and-wait rather than a window: the medium is half-duplex with a
-single master, so there is no pipelining to exploit, and a sliding window would add
-state without adding throughput. On the WLAN carrier the mechanism is unchanged and
-effectively free, since ACKs return immediately.
-
-Because the carrier discards frames that fail their own CRC (§15.3), this link
-loses frames but never delivers corrupted ones. Sequence-plus-ACK-plus-retransmit
-is therefore sufficient; no corruption detection of our own is required beyond the
-framing CRC.
-
-On exhausting attempts the frame is abandoned, the failure is reported to §8, and
-no automatic recovery is attempted — persistent failure is indicated for human
-resolution (N4).
+The carrier discards frames that fail their own PHY CRC (§15.3), so this link loses
+frames but never delivers corrupted ones; sequence-plus-ACK-plus-retransmit is
+sufficient. On exhausting attempts the frame is abandoned, the failure is reported
+to §8, and no automatic recovery is attempted (N4).
 
 ### 10.6 Failure modes
 
@@ -760,7 +716,7 @@ resolution (N4).
 | Partial frame received | Retained in the reassembly buffer until complete or `frame_timeout` elapses, then discarded and counted |
 | Garbage / lost sync | Byte-wise resynchronisation on the sync word; discarded bytes counted |
 | Coalesced frames in one read | All complete frames extracted from the buffer in order |
-| CRC failure | Discarded and counted (FR-10.5); ARQ handles the resulting retransmission |
+| CRC failure | Discarded and counted (FR-10.5); ARQ handles the retransmission |
 | Duplicate delivery | Re-acknowledged, applied once (FR-10.7) |
 | Fragment set incomplete | Whole set discarded after `frag_timeout`; sender retries the set |
 
@@ -771,13 +727,11 @@ resolution (N4).
 ### 11.1 Purpose and peer
 
 Configures a locally attached SX1262 DTU over its AT command set, so that a node's
-radio settings come from its configuration file rather than from manual
-pre-provisioning of dongles.
+radio settings come from its configuration file.
 
-**Remote configuration is possible.** Entering AT mode requires the escape to be
-terminated with CRLF — `+++\r\n`. A bare `+++` produces no response, which is why
-this was previously believed to need a hardware pin. Verified on firmware Ver1.2;
-see [lora-dtu-sx1262.md](lora-dtu-sx1262.md).
+Entering AT mode requires the escape terminated with CRLF — `+++\r\n`; a bare `+++`
+produces no response. Verified on firmware Ver1.2; see
+[lora-dtu-sx1262.md](lora-dtu-sx1262.md).
 
 ### 11.2 Requirements
 
@@ -790,7 +744,7 @@ see [lora-dtu-sx1262.md](lora-dtu-sx1262.md).
 - **FR-11.4** [Must] Entering AT mode shall use `+++\r\n`; every command shall be
   CRLF-terminated.
 - **FR-11.5** [Must] The agent shall guarantee `AT+EXIT` on every exit path,
-  including on error, so a DTU is never left in AT mode unable to pass data.
+  including on error, so a DTU is never left in AT mode.
 - **FR-11.6** [Must] Radio parameters shall be applied exactly as configured, with
   no plausibility checking (§1.2, A2).
 - **FR-11.7** [Should] Parameters shall be queried individually rather than parsed
@@ -805,8 +759,8 @@ see [lora-dtu-sx1262.md](lora-dtu-sx1262.md).
 | `AT+MODE` | operating mode | `1` (transparent/stream) — required by §15.1 |
 | `AT+ADDR` | node address | per §18.2 |
 | `AT+TXCH`,`AT+RXCH` | channel | operator-owned (§1.2) |
-| `AT+SF`,`AT+BW`,`AT+CR`,`AT+PWR` | radio parameters | operator-owned. `AT+BW` takes an **index** (`0`=125 kHz), not a value in kHz — the shipped presets disagree with the firmware |
-| `AT+LBT` | listen-before-talk | `0`. The master owns the schedule (§2.1), so collision avoidance is redundant, and LBT can delay a transmission long enough to expire an ARQ timeout and manufacture phantom retries |
+| `AT+SF`,`AT+BW`,`AT+CR`,`AT+PWR` | radio parameters | operator-owned. `AT+BW` takes an **index** (`0`=125 kHz), not a value in kHz. `AT+PWR` range 10–22 dBm |
+| `AT+LBT` | listen-before-talk | `0`; the master owns the schedule (§2.1) |
 | `AT+RSSI` | append RSSI to received data | configurable; display-only (NFR-8.1). Affects framing (FR-10.4) |
 | `AT+KEY` | AES key | **write-only**; cannot be read back (FR-11.3). Not a security control (§22.2) |
 
@@ -827,37 +781,28 @@ see [lora-dtu-sx1262.md](lora-dtu-sx1262.md).
 ### 12.1 Purpose and peer
 
 Consumes direction-of-arrival measurements from the KrakenSDR software on the same
-host. Contract detail and its derivation are in
+host. Contract detail is in
 [krakensdr-integration.md](krakensdr-integration.md).
 
 ### 12.2 Protocol
 
 With `doa_data_format = "Kraken Pro Local"`, the DSP posts every measurement to its
 Node middleware, which broadcasts it to all WebSocket clients on port **8021**. The
-station therefore **subscribes and is pushed to**; it does not poll.
-
-**Unverified on our hardware.** Port 8021 was found closed on a live station, which
-may be a consequence of its current `doa_data_format` (`Full POST`) rather than the
-feature's absence — upstream starts the WebSocket server conditionally. Confirming
-this is a blocking Phase 2 item, since it decides the read path; the
-`DOA_value.html` polling route is the fallback if it does not hold.
+station **subscribes and is pushed to**; it does not poll.
 
 ```
 ws://127.0.0.1:8021   →   one JSON object per measurement
 ```
 
+The station requires `doa_data_format = Kraken Pro Local`; other formats do not
+provide this local push feed. On the deployed station `doa_data_format` is
+`Full POST` and port 8021 is not served, so the read path is confirmed once
+`Kraken Pro Local` is set at commissioning (§23.2).
+
 Fields consumed: `station_id`, `tStamp`, `radioBearing`, `conf`, `power`, `freq`,
 `latitude`, `longitude`, `speed`, `latency`, `processing_time`, `adc_overdrive`,
-`num_corr_sources`, `snr`. `doaArray` (the full spectrum) is **ignored in v1** — it
-is far too large for the LoRa carrier and v1 displays no graphics (N2).
-
-**Rejected alternatives**, with reasons, so they are not revisited:
-
-| Format | Why not |
-|--------|---------|
-| `Kraken Pro Remote` | relays measurements to a third-party cloud endpoint |
-| `Full POST` | its code path performs a synchronous, un-timed public-IP lookup once per second inside the processing loop; with no internet this stalls the DSP thread (A5) |
-| `DOA_value.html` polling | polling rather than push, and it writes `360 − θ₀` rather than `θ₀` — a latent sign error |
+`num_corr_sources`, `snr`. `conf` is not normalised to 0..1 (§9.3). `doaArray` (the
+full spectrum) is **not consumed in v1**.
 
 ### 12.3 Backends
 
@@ -869,8 +814,8 @@ One internal measurement type, three sources, selected by configuration:
 | `simulator` | `KrakenSimulator` | HTTP `GET /api/v1/doa` |
 | `synthetic` | host-tier tests, no hardware | in-process generator |
 
-The simulator is **not wire-compatible** with the real software despite claiming to
-be, so the adapter is required rather than optional:
+The simulator and the real software use different field names and transports; the
+adapter maps between them:
 
 | | simulator | real |
 |---|---|---|
@@ -902,8 +847,8 @@ be, so the adapter is required rather than optional:
 | WebSocket refuses connection | Retry with capped exponential backoff; feed state down; polls still answered |
 | Connection drops mid-stream | As above; last measurement retained and ages out per §9.7 |
 | Malformed JSON, or missing required field | Record discarded and counted (FR-12.4) |
-| `doa_data_format` changed away from `Kraken Pro Local` | Feed goes silent. Detected as feed-down; §7 read-back reveals the cause |
-| Feed faster than the poll cycle | Expected. Latest wins; discard count reported (FR-9.4) |
+| `doa_data_format` not `Kraken Pro Local` | Feed silent. Detected as feed-down; §7 read-back reveals the cause |
+| Feed faster than the poll cycle | Latest wins; discard count reported (FR-9.4) |
 
 ---
 
@@ -913,24 +858,25 @@ be, so the adapter is required rather than optional:
 
 Reads and writes the KrakenSDR configuration on the local host.
 
-**Two routes exist, and the deployed stations support only the second.** Probing a
-live station showed that the middleware REST route documented upstream returns 404
-— port 8042 is Express, but that route postdates the installed build, while
-miniserve on 8081 works.
+**As deployed, a station can be read remotely but not written.** The routes:
 
 ```
-GET  http://127.0.0.1:8081/settings.json                      ← verified working
-POST http://127.0.0.1:8081/upload?path=/   (multipart)        ← documented, untested
-
-GET  http://127.0.0.1:8042/settings                           ← 404 on our stations
-POST http://127.0.0.1:8042/settings                           ← 404 on our stations
+GET  http://127.0.0.1:8081/settings.json                  works (read-only)
+POST http://127.0.0.1:8081/upload?path=/   (multipart)    404
+GET  http://127.0.0.1:8042/settings                       404
+POST http://127.0.0.1:8042/settings                       404
 ```
 
-The interface shall therefore be **route-agnostic**: one internal read/write
-contract with two implementations, selected by configuration and probed at startup.
-The 8042 route is the preferred target once stations are updated, since it is a
-clean JSON API rather than a file upload. See
-[krakensdr-integration.md](krakensdr-integration.md).
+- **8081 is read-only by configuration.** `gui_run.sh` adds miniserve's `-u`
+  (`--upload-files`) flag only when `en_remote_control` is true in `settings.json`;
+  it is false on the deployed station. `en_remote_control` can only be changed
+  locally, so enabling remote writing is a **commissioning prerequisite** (§23.2).
+- **8042 lacks the `/settings` route.** Port 8042 is the Express middleware and is
+  running, but the installed build predates that route.
+
+The interface is **route-agnostic**: one internal read/write contract, with
+implementations for both routes, probed at startup to discover which the local
+station provides.
 
 ### 13.2 Requirements
 
@@ -938,43 +884,45 @@ clean JSON API rather than a file upload. See
   merging the changed fields, and writing the merged result back.
 - **FR-13.5** [Must] The agent shall support both write routes behind one internal
   contract, and shall determine at startup which the local station provides.
+- **FR-13.6** [Must] When no write route is available, the agent shall report the
+  station as **read-only** rather than failing, shall still serve configuration
+  read-back for divergence detection (§7.5), and shall reject parameter pushes with
+  a distinct reason the UI can display.
 - **FR-13.2** [Must] After every write the agent shall re-read settings and compute
   the canonical CRC from that read-back (FR-7.5).
 - **FR-13.3** [Must] The agent shall report every field the KrakenSDR altered,
   clamped, or ignored relative to what was requested.
-- **FR-13.4** [Must] The agent shall remain fully operational when this interface
-  is unreachable (§2.3).
+- **FR-13.4** [Must] The agent shall remain fully operational when this interface is
+  unreachable (§2.3).
 - **NFR-13.1** [Must] A parameter application shall complete within
   `param_apply_timeout_s` or be reported as failed, never left indeterminate.
 
 ### 13.3 Application is live
 
 The KrakenSDR software watches its settings file on a **0.5 s timer** and applies
-changes in place, including retuning the receiver when the centre frequency
-changes. There is no service restart and no measurement outage of consequence.
-Consequently the parameter push is an ordinary operation: it needs no operator
-warning and no "station is blind" state in the UI.
+changes in place, including retuning the receiver when the centre frequency changes.
+There is no service restart. The parameter push is an ordinary operation with no
+"station is blind" state in the UI.
 
 ### 13.4 All settings are exposed
 
-Every field is operator-editable (§14.3). What makes that safe is not a UI
-restriction but two architectural properties:
+Every field is operator-editable (§14.3). This is safe because:
 
 - the station agent is independent of KrakenSDR health (§2.3), so no setting can
   take away the channel needed to undo it;
 - the Management Pi retains the previous accepted snapshot (§7.6).
 
-The UI still **warns** on fields the system itself depends on — `doa_data_format`
-(silences the feed), `default_ip` and `data_interface` (break the DAQ chain) — but
-does not prevent their change.
+The UI **warns** on fields the system depends on — `doa_data_format` (silences the
+feed), `default_ip` and `data_interface` (break the DAQ chain) — but does not
+prevent their change.
 
 ### 13.5 Failure modes
 
 | Condition | Behaviour |
 |-----------|-----------|
 | Endpoint unreachable | Delta not applied; ACK carries `kraken_down`; CRC not asserted; distinguished from divergence (§7.7) |
-| POST accepted but read-back differs | Reported per FR-13.3; surfaces as `CONFIG_DIVERGED` at the Management Pi |
-| Middleware not running | Same as unreachable. Whether it runs by default on a stock image is unverified (§4.3) |
+| Write accepted but read-back differs | Reported per FR-13.3; surfaces as `CONFIG_DIVERGED` at the Management Pi |
+| No write route available | Station reported read-only (FR-13.6); reads still served |
 | Malformed settings written | The API performs no schema validation. Mitigated by revert (§7.6) |
 
 ---
@@ -988,9 +936,8 @@ A browser-facing interface on the Management Pi. Its peer is the operator.
 ### 14.2 Protocol and assets
 
 - HTTP for the page and for operator actions; a **WebSocket** pushes live values.
-- **All assets are served locally.** No CDN, no external font, no tile server, no
-  outbound request of any kind (A5). Because v1 displays numbers only (N2), no
-  charting or mapping library is required at all, so this constraint costs nothing.
+- **All assets are served locally** (A5). v1 displays numbers only (N2), so no
+  charting or mapping library is required.
 
 ### 14.3 Requirements
 
@@ -1005,12 +952,12 @@ A browser-facing interface on the Management Pi. Its peer is the operator.
   without preventing their modification.
 - **FR-14.5** [Must] Editing a field shall transmit a delta (FR-7.1), never a full
   set.
-- **FR-14.6** [Must] The UI shall provide explicit *Read full settings* and
-  *Push full settings* actions per station (FR-7.8).
+- **FR-14.6** [Must] The UI shall provide explicit *Read full settings* and *Push
+  full settings* actions per station (FR-7.8).
 - **FR-14.7** [Must] The UI shall provide a *revert to last known good* action per
   station (§7.6).
-- **FR-14.8** [Must] The UI shall provide a per-station carrier pin control
-  (FR-6.5) and show when a pin is in force.
+- **FR-14.8** [Must] The UI shall provide a per-station carrier pin control (FR-6.5)
+  and show when a pin is in force.
 - **FR-14.9** [Must] The UI shall display a live tail of the debugging log (§20).
 - **FR-14.10** [Must] Health and configuration state shall be shown as **separate**
   indicators (FR-8.6), each labelled with the carrier it refers to (§8.5).
@@ -1018,8 +965,8 @@ A browser-facing interface on the Management Pi. Its peer is the operator.
 
 ### 14.4 Panels
 
-Grouped as the KrakenSDR software groups them, so its own documentation — vendored
-at [krakensdr-wiki/](krakensdr-wiki/) — serves as the UI's reference.
+Grouped as the KrakenSDR software groups them; its documentation is vendored at
+[krakensdr-wiki/](krakensdr-wiki/).
 
 | Panel | Content |
 |-------|---------|
@@ -1034,8 +981,7 @@ at [krakensdr-wiki/](krakensdr-wiki/) — serves as the UI's reference.
 | Link | carrier pin, health thresholds, cycle period, log tail |
 
 Field types, units and ranges come from the field registry (§7.3), so the form is
-generated from data rather than hand-written per field. Note the unit trap the
-registry must encode: `center_freq` is in **MHz** while `vfo_freq_N` is in **Hz**.
+generated from data. `center_freq` is in **MHz** while `vfo_freq_N` is in **Hz**.
 
 ### 14.5 Failure modes
 
@@ -1055,7 +1001,7 @@ registry must encode: `center_freq` is in **MHz** while `vfo_freq_N` is in **Hz*
 ### 15.1 Purpose and division of responsibility
 
 The SX1262 DTU is a vendor device used as a **transparent byte pipe** (`AT+MODE=1`).
-We configure it (§11) and rely on its documented behaviour; we do not implement it.
+We configure it (§11) and rely on its documented behaviour.
 
 | We own | The device owns |
 |--------|-----------------|
@@ -1073,24 +1019,23 @@ Three byte carriers behind one interface, so nothing above §10 knows which is i
 
 ### 15.3 Properties relied upon
 
-- **Payload CRC cannot be disabled**, and a packet failing it is dropped rather
-  than delivered. The link therefore **loses frames but never corrupts them**,
-  which is what makes sequence-plus-ACK sufficient (§10.5).
-- **Maximum single packet is 240 bytes**; larger writes are auto-packetised. We cap
-  frames at 209 B (§10.2) to stay inside one packet.
+- **Payload CRC cannot be disabled**, and a packet failing it is dropped rather than
+  delivered. The link **loses frames but never corrupts them** (§10.5).
+- **Maximum single packet is 240 bytes**; larger writes are auto-packetised. Frames
+  are capped at 209 B (§10.2) to stay inside one packet.
 - **Transparent mode has no local echo** — bytes written to a DTU do not return on
-  that port. Diagnostics must read the *peer*.
+  that port. Diagnostics read the *peer*.
 - **First-packet warm-up loss**: the first one or two transmissions after opening a
-  fresh connection may be dropped. Startup shall send and discard a throwaway
-  frame.
+  fresh connection may be dropped. Startup shall send and discard a throwaway frame.
 - 960-byte internal cache and auto-packetisation are fixed and not configurable.
 
 ### 15.4 Requirements
 
 - **NFR-15.1** [Must] No component above §10 shall depend on which carrier is in use.
 - **NFR-15.2** [Must] Startup shall absorb warm-up loss before the first real frame.
-- **NFR-15.3** [Must] Slot resolution from a workbench slot label to a carrier URL
-  shall be dynamic; device-node ordering is not stable across enumerations.
+- **NFR-15.3** [Must] Resolution of a serial device shall be by stable identity — a
+  `/dev/serial/by-id/` path on a Pi (§2.2), or a workbench slot label on the bench —
+  not by `ttyACM` index, which is not stable across enumerations.
 
 ### 15.5 Failure modes
 
@@ -1108,8 +1053,7 @@ Exercised **transitively** through §10 and §11 — this layer has no tests of 
 
 ### 16.1 Purpose and division of responsibility
 
-External software on the station host. We configure it and consume its outputs; we
-do not modify it.
+External software on the station host. We configure it and consume its outputs.
 
 | We own | It owns |
 |--------|---------|
@@ -1117,8 +1061,8 @@ do not modify it.
 
 ### 16.2 Lifecycle and gating
 
-Our agent and this software start independently. **The agent shall not gate its
-own startup on the software being present or healthy** (§2.3, FR-13.4): it starts,
+Our agent and this software start independently. **The agent shall not gate its own
+startup on the software being present or healthy** (§2.3, FR-13.4): it starts,
 answers polls, and reports the feed as down.
 
 ### 16.3 Requirements
@@ -1129,10 +1073,9 @@ answers polls, and reports the feed as down.
 
 ### 16.4 Failure modes
 
-Exercised transitively through §12 and §13. Upstream behaviours that are relied
-upon and could change — the middleware ports, the `Kraken Pro Local` fan-out, the
-0.5 s settings watcher — are listed as risk R3 and covered by the simulator
-backend.
+Exercised transitively through §12 and §13. Relied-upon upstream behaviours — the
+middleware ports, the `Kraken Pro Local` fan-out, the 0.5 s settings watcher — are
+covered by the simulator backend.
 
 ---
 
@@ -1141,14 +1084,14 @@ backend.
 ### 17.1 Purpose and division of responsibility
 
 Raspberry Pi OS, systemd, the network stack, the filesystem, and Python. We
-configure units, paths and dependencies; we implement none of it.
+configure units, paths and dependencies.
 
 ### 17.2 Requirements
 
 - **NFR-17.1** [Must] Each node shall run as a single systemd service, restarting
   automatically on failure.
 - **NFR-17.2** [Must] Configuration shall live outside the repository, in
-  `/etc/hornethunter/`, so updates cannot overwrite it.
+  `/etc/hornethunter/`.
 - **NFR-17.3** [Must] Logs shall be written to a local path with size-bounded
   rotation (§20.4).
 - **NFR-17.4** [Must] A node shall reach a working state after an unattended power
@@ -1160,7 +1103,55 @@ configure units, paths and dependencies; we implement none of it.
 |-----------|-----------|
 | Service crash | systemd restarts; restart counted and logged; health window resets |
 | Disk full | Rotation bounds log growth (§20.4); logging degrades before operation does |
-| Clock jumps (no NTP) | Tolerated: v1 uses no absolute cross-node time (§9.5). Log timestamps may jump and shall record monotonic time alongside wall-clock |
+| Clock jumps (no NTP) | Tolerated: v1 uses no absolute cross-node time (§9.5). Log timestamps record monotonic time alongside wall-clock |
+
+### 17.4 Access-point configuration
+
+The Management Pi provides the field WLAN as a NetworkManager access point on
+`wlan0`, with `eth0` as the uplink. NetworkManager supplies both the access point
+(its hostapd backend) and DHCP/DNS (its internal dnsmasq) via `ipv4.method shared`;
+no `hostapd` or `dnsmasq` packages are installed. Verified platform: Debian 13
+(trixie), NetworkManager 1.52.
+
+- **NFR-17.5** [Must] The Management Pi shall run a NetworkManager AP-mode
+  connection on `wlan0` with `ipv4.method shared`, autostarting at boot.
+- **NFR-17.6** [Must] Each station shall associate to that SSID via a
+  NetworkManager client connection, autostarting at boot.
+- **NFR-17.7** [Must] The access-point subnet shall not overlap any uplink subnet.
+
+| Parameter | Value |
+|-----------|-------|
+| interface | `wlan0` access point, `eth0` uplink |
+| mechanism | NetworkManager connection, `802-11-wireless.mode ap`, `ipv4.method shared` |
+| AP address / subnet | `192.168.50.1/24` |
+| station leases | NetworkManager shared DHCP, `192.168.50.0/24` |
+| band | 2.4 GHz (`bg`) |
+| channel | operator-chosen (NetworkManager auto by default) |
+| SSID / passphrase | operator-set, WPA2-PSK (`wpa-psk`) |
+
+**Reproducible setup — Management Pi (access point):**
+
+```bash
+nmcli con add type wifi ifname wlan0 con-name hh-ap ssid "<SSID>" autoconnect yes
+nmcli con modify hh-ap \
+  802-11-wireless.mode ap 802-11-wireless.band bg \
+  wifi-sec.key-mgmt wpa-psk wifi-sec.psk "<passphrase>" \
+  ipv4.method shared ipv4.addresses 192.168.50.1/24 \
+  connection.autoconnect-priority 100
+nmcli con up hh-ap
+```
+
+**Reproducible setup — each station (associate to the access point):**
+
+```bash
+nmcli con add type wifi ifname wlan0 con-name hh-field ssid "<SSID>" autoconnect yes
+nmcli con modify hh-field wifi-sec.key-mgmt wpa-psk wifi-sec.psk "<passphrase>"
+nmcli con up hh-field
+```
+
+Stations then receive a `192.168.50.x` lease, which the WLAN carrier (§6, §15.2)
+uses when associated. The wired `eth0` path (§2.2) remains available regardless of
+`wlan0` state.
 
 ---
 
@@ -1180,18 +1171,17 @@ configure units, paths and dependencies; we implement none of it.
 ### 18.2 DTU addressing
 
 Transparent mode is **group-addressed, not a flat broadcast**: a receiver accepts a
-frame only when both address and channel match the sender — except address
-`0xFFFF`, which receives from all addresses on its channel and whose transmissions
-reach all of them.
+frame only when both address and channel match the sender — except address `0xFFFF`,
+which receives from all addresses on its channel and whose transmissions reach all
+of them.
 
 | Node | DTU `AT+ADDR` | Consequence |
 |------|---------------|-------------|
 | Management Pi | `0xFFFF` | its polls reach every station; it hears every station |
 | Station *n* | `0x0001`, `0x0002`, … | stations are **mutually deaf** |
 
-Mutual deafness is deliberate: no station can be confused by another's reply, and
-each processes only traffic intended for it. It also means a broadcast poll reaches
-all stations in one transmission (§5.3).
+A broadcast poll reaches all stations in one transmission (§5.3), and no station
+processes another's reply.
 
 ---
 
@@ -1199,8 +1189,8 @@ all stations in one transmission (§5.3).
 
 ### 19.1 Requirements
 
-- **FR-19.1** [Must] All tunables shall be declared in configuration with
-  documented defaults; none shall be hard-coded at a call site.
+- **FR-19.1** [Must] All tunables shall be declared in configuration with documented
+  defaults; none shall be hard-coded at a call site.
 - **FR-19.2** [Must] Health thresholds, window length and cycle period shall be
   changeable at runtime without restart (NFR-8.2).
 - **FR-19.3** [Must] Radio parameters shall be applied verbatim, without
@@ -1229,17 +1219,16 @@ Defaults are in Appendix C.
 
 ### 20.1 Purpose
 
-v1 is an instrument (§1.1), so observability is a deliverable, not a convenience.
-The log must be sufficient to reconstruct after the fact *why* the link or the
-Kraken interface behaved as it did.
+The log shall be sufficient to reconstruct after the fact why the link or the Kraken
+interface behaved as it did.
 
 ### 20.2 Requirements
 
 - **FR-20.1** [Must] Each node shall write structured **JSONL**, one object per
   event, machine-parseable without regular expressions.
 - **FR-20.2** [Must] Every transmitted and received frame shall be logged with
-  direction, type, source, destination, sequence, length, attempt number,
-  round-trip time, CRC result, carrier, and RSSI when available.
+  direction, type, source, destination, sequence, length, attempt number, round-trip
+  time, CRC result, carrier, and RSSI when available.
 - **FR-20.3** [Must] Every health state transition, ARQ exhaustion, carrier switch
   and health-window reset shall be logged with its cause.
 - **FR-20.4** [Must] Every parameter operation shall be logged with the fields
@@ -1254,15 +1243,13 @@ Kraken interface behaved as it did.
 
 ### 20.3 Carrier attribution
 
-Because carrier selection is automatic (§6), a record without carrier attribution
-is ambiguous and therefore useless for characterisation. Every frame record, every
-bearing and every health event carries its carrier (FR-6.6).
+Every frame record, every bearing and every health event carries its carrier
+(FR-6.6).
 
 ### 20.4 Retrieval
 
 Logs are local files, rotated by size. They are retrieved **over WLAN** when
-co-located, or read on the node. FR-20.6 is not merely a bandwidth economy:
-shipping logs over the link under measurement would perturb the measurement.
+co-located, or read on the node.
 
 ---
 
@@ -1271,16 +1258,15 @@ shipping logs over the link under measurement would perturb the measurement.
 ### 21.1 Principle
 
 **Indicate, do not conceal.** A fault that cannot be resolved automatically is
-surfaced and left for a human (N4). The system's own reliability requirement — that
-degradation should not occur in normal operation — is only meaningful if
-degradation is visible when it does occur.
+surfaced and left for a human (N4).
 
 ### 21.2 Requirements
 
 - **FR-21.1** [Must] No fault shall be silently retried indefinitely. Retries shall
   be bounded, counted, and reported.
 - **FR-21.2** [Must] Exactly one class of automatic remediation exists: the single
-  full-set configuration push on CRC mismatch (FR-7.7). Everything else is indicated.
+  full-set configuration push on CRC mismatch (FR-7.7). Everything else is
+  indicated.
 - **FR-21.3** [Must] Absence of data shall be represented explicitly. A stale value
   shall never be presented as current (§9.7, §14.5).
 - **FR-21.4** [Must] A node shall degrade rather than exit: loss of the Kraken feed,
@@ -1305,8 +1291,8 @@ degradation is visible when it does occur.
 
 ### 22.1 Scope
 
-The threat model for v1 is **accidental**, not adversarial: the system must not
-silently accept malformed, duplicated, stale, or wrongly-addressed data. Protecting
+The threat model for v1 is **accidental**, not adversarial: the system shall not
+silently accept malformed, duplicated, stale, or wrongly-addressed data. Protection
 against a deliberate attacker on the RF medium is out of scope for v1.
 
 ### 22.2 What is and is not a control
@@ -1314,11 +1300,9 @@ against a deliberate attacker on the RF medium is out of scope for v1.
 - **Integrity within the system**: framing CRC (§10.2), sequence numbers and
   duplicate suppression (FR-10.7), address filtering (FR-18.3), and the
   configuration CRC (§7.4).
-- **`AT+KEY` is not a security control.** The device offers AES keyed by a
-  **16-bit** value — about 65 000 possibilities — and the key is write-only, so it
-  cannot be audited. It may be set as a network separator to keep unrelated
-  installations apart. It shall not be described, in code or documentation, as
-  providing confidentiality (A6).
+- **`AT+KEY` is not a security control.** The device offers AES keyed by a **16-bit**
+  value, and the key is write-only, so it cannot be audited. It may be set as a
+  network separator. It shall not be described as providing confidentiality (A6).
 - **No confidentiality of bearings** is provided or claimed.
 
 ### 22.3 Requirements
@@ -1340,8 +1324,6 @@ against a deliberate attacker on the RF medium is out of scope for v1.
 
 ## 23. Operational Procedures
 
-A reading path through the chapters above; it does not restate their detail.
-
 ### 23.1 Deploy
 
 1. Provision each Pi by sparse-checkout of its own target — see
@@ -1352,21 +1334,23 @@ A reading path through the chapters above; it does not restate their detail.
 ### 23.2 Commission a station
 
 1. Operator performs all RF setup — frequency, array geometry, spacing, and
-   **manual alignment of the array to 0° heading** (§1.2, A3). The software neither
-   checks nor assists this; a misalignment becomes a silent bearing error (§9.4), so
-   verify it by independent means before trusting bearings.
-2. Start the node; the agent provisions its DTU (§11) and connects to the Kraken
+   **manual alignment of the array to 0° heading** (§1.2, A3). A misalignment
+   becomes a silent bearing error (§9.4); verify it by independent means.
+2. Enable remote configuration: set `en_remote_control` true in the KrakenSDR
+   settings locally, so a write route is available (§13.1), and set
+   `doa_data_format = Kraken Pro Local` so the DoA feed is served (§12.2).
+3. Start the node; the agent provisions its DTU (§11) and connects to the Kraken
    feed (§12).
-3. From the Management Pi, perform a manual **full-set read** (FR-7.8) — a station
+4. From the Management Pi, perform a manual **full-set read** (FR-7.8) — a station
    with no mirror entry has no baseline for deltas (§7.7).
-4. Confirm the station reports `GREEN` on the intended carrier (§8.3) and that
+5. Confirm the station reports `GREEN` on the intended carrier (§8.3) and that
    bearings arrive with plausible age.
 
 ### 23.3 Operate
 
 Watch the numeric rows and the two independent indicators — link health (§8.3) and
-configuration state (§7.5), each labelled with its carrier (§8.5). Carrier
-selection is automatic (§6); pin it (FR-6.5) when characterising one carrier.
+configuration state (§7.5), each labelled with its carrier (§8.5). Carrier selection
+is automatic (§6); pin it (FR-6.5) when characterising one carrier.
 
 ### 23.4 Reconfigure
 
@@ -1381,6 +1365,7 @@ change misbehaves.
 | Station `RED` or `LOST` | §8.3, §6.5 — carrier state, then power and antenna |
 | `CONFIG_DIVERGED` latched | §7.7 — inspect read-back differences in the log, then manual full push |
 | No bearings, link healthy | §12.5 — Kraken feed, then `doa_data_format` |
+| Station read-only, pushes rejected | §13.1 — enable `en_remote_control` locally |
 | Bearings implausible but link and config healthy | Operator-owned RF domain (§1.2): alignment, array, squelch |
 | DTU passes no data | §15.5 — possibly stuck in AT mode; `AT+REBOOT` or power cycle |
 
@@ -1404,11 +1389,9 @@ L1 interfaces are split — pure core at the host tier, wire and flow behaviour 
 bench tier. L0 foundation has **no tests of its own** and is exercised transitively
 through the L1 chapters that use it (§15.5, §16.4).
 
-**The bench cannot substitute for the field.** Measured airtime on the bench is
-identical with dummy loads and with antennas (Appendix B), because airtime does not
-depend on link margin — but reliability does. Bench loss figures are best-case and
-say nothing about the field, so every reliability threshold in §8.4 is provisional
-until calibrated at the field tier (R1).
+Measured airtime on the bench is identical with dummy loads and with antennas
+(Appendix B); reliability is not. Every reliability threshold in §8.4 is provisional
+until calibrated at the field tier.
 
 ### 24.2 Acceptance tests
 
@@ -1428,20 +1411,19 @@ until calibrated at the field tier (R1).
 | AT-12 | Carrier switch during traffic loses no frame; window resets; carrier stamped on every record | bench | NFR-6.1, FR-6.6, FR-8.5 |
 | AT-13 | Station remains pollable with the KrakenSDR software stopped, and reports `no_data` | bench | FR-13.4, NFR-16.1, FR-9.6 |
 | AT-14 | Management restart resumes delta operation from the persisted mirror with no full push | bench | FR-7.9 |
-| AT-15 | Link stays out of `ORANGE` for a sustained run at intended deployment range | field | §8.3, R1 |
+| AT-15 | Link stays out of `ORANGE` for a sustained run at intended deployment range | field | §8.3 |
 | AT-16 | Health thresholds calibrated against measured retry behaviour at range | field | §8.4, NFR-8.2 |
 
 ### 24.3 Traceability
 
-Traceability is **generated**, never hand-maintained here. Each requirement above
-carries a stable ID in its owning chapter, and each test spec cites the IDs it
-exercises; the traceability tool crosses them to produce:
+Traceability is **generated**, never hand-maintained here. Each requirement carries
+a stable ID in its owning chapter, and each test spec cites the IDs it exercises;
+the traceability tool crosses them to produce:
 
 - `tests/coverage-matrix.md` — component × tier coverage
 - `tests/gaps.md` — Must/Should requirements with no referencing test
 
-Test specs mirror the chapter spine one-to-one, so reorganising chapters never
-breaks linkage.
+Test specs mirror the chapter spine one-to-one.
 
 ---
 
@@ -1462,8 +1444,7 @@ breaks linkage.
 ### Appendix B — Measured airtime
 
 SF7 / BW 125 kHz / CR 4-5, byte-exact at every size. Measured over the workbench on
-two DTUs; **identical with antennas and with dummy loads**, confirming airtime is
-independent of link margin (§24.1).
+two DTUs; identical with antennas and with dummy loads.
 
 | payload | latency | throughput |
 |--------:|--------:|-----------:|
@@ -1475,19 +1456,13 @@ independent of link margin (§24.1).
 | 200 B | 385 ms | 520 B/s |
 | 240 B | 444 ms | 540 B/s |
 
-A fixed cost of ~60 ms per packet dominates small frames, which is why a
-10-byte bearing record and a 20-byte delta cost almost the same airtime — and why
-batching was rejected for bearings but delta encoding was adopted for
-configuration (§7.1, FR-9.2).
+A fixed cost of ~60 ms per packet dominates small frames, so a 10-byte bearing
+record and a 20-byte delta cost almost the same airtime.
 
 Derived frame sizes: `POLL` ≈ 12 B, `BEARING` ≈ 19 B (23 B with position),
-single-field `PARAM_DELTA` ≈ 12 B.
-
-A **full set is larger than first estimated**: a live station carries 158 fields
-(§7.3), so even serialising only VFO slots up to `active_vfos` (FR-7.10) the set
-runs to several hundred bytes and **3–4 fragments, on the order of 1–1.5 s**. This
-is acceptable because full pushes are rare — first contact, manual request, or the
-single automatic resync (FR-7.7) — but it is the reason deltas are the normal path.
+single-field `PARAM_DELTA` ≈ 12 B. A full set over 158 fields (§7.3), serialising
+only VFO slots up to `active_vfos` (FR-7.10), runs to several hundred bytes and
+**3–4 fragments, on the order of 1–1.5 s**.
 
 ### Appendix C — Defaults
 
@@ -1506,7 +1481,7 @@ single automatic resync (FR-7.7) — but it is the reason deltas are the normal 
 | `carrier.promote_probes` | 3 |
 | `carrier.demote_probes` | 2 |
 | `carrier.dwell_s` | 30 |
-| `bearing.position_epsilon_dm` | 10 |
+| `bearing.position_epsilon_dm` | 50 |
 | `bearing.max_age_ms` | 5000 |
 | `kraken.param_apply_timeout_s` | 5 |
 | `link.lbt` | 0 |
@@ -1514,28 +1489,11 @@ single automatic resync (FR-7.7) — but it is the reason deltas are the normal 
 Radio parameters (`link.channel`, `link.sf`, `link.bw`, `link.cr`, `link.power`)
 have **no defaults asserted here** — they are operator-owned (§1.2, FR-19.3).
 
-### Appendix D — Wire contract change from the scaffolding
-
-`hornethunter_shared.messages.BearingReport` as currently scaffolded does not match
-this specification and must be revised:
-
-| Current field | Change |
-|---------------|--------|
-| `timestamp: float` | **replaced** by `age_ms` (§9.5 — no absolute time in v1) |
-| `latitude`, `longitude` | **conditional** — transmitted only on change (FR-9.5) |
-| `confidence` | retained; sourced from the feed's `conf` |
-| `frequency_hz` | **removed** from the per-bearing record — it is configuration, not measurement, and is already tracked by `config_version` |
-| — | **added**: `flags`, `power_dbm`, `config_version`, `config_crc` |
-
-`SCHEMA_VERSION` shall be incremented, and `BearingReport` gains a binary codec
-alongside its JSON form — JSON remains useful for logs and tests, but is never the
-wire form (§10.1).
-
 ---
 
 ## Related
 
-- [[lora-dtu-sx1262]] — DTU behaviour, AT reference, hardware-verified corrections
-- [[krakensdr-integration]] — KrakenSDR API contract, verified from source
+- [[lora-dtu-sx1262]] — DTU behaviour and AT reference
+- [[krakensdr-integration]] — KrakenSDR API contract
 - [[krakensdr-wiki/README]] — vendored upstream KrakenSDR documentation
 - [[deployment]] — two-target sparse-checkout deployment

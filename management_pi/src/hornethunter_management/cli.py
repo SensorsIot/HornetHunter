@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 from hornethunter_management import __version__
 from hornethunter_shared.config import load_config, require
@@ -78,8 +79,45 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     listen = require(config, "server", "listen")
     port = require(config, "server", "port")
-    print(f"hornethunter-management: would serve on {listen}:{port}")
-    print("report intake and map UI are not implemented yet")
+    return run_server(config, listen, port)
+
+
+def run_server(config: dict[str, Any], listen: Any, port: Any) -> int:
+    """Start the master loop and the Flask UI (FSD §14).
+
+    This is the real-run path: it is not unit-tested and its heavy imports are kept
+    local so the tested code paths (`--fix-from`, `--version`) never load Flask. The
+    UI binds to the operator-configured interface, defaulting to the local network
+    (NFR-22.3).
+    """
+    import threading
+    import time
+
+    from hornethunter_management.master import Master, MasterConfig
+    from hornethunter_management.mirror import ConfigMirror
+    from hornethunter_management.ui import create_app
+    from hornethunter_shared.carrier import SerialCarrier
+
+    log_section = config.get("log", {})
+    log_path = log_section.get("path", "/var/log/hornethunter/management.jsonl")
+    mirror_section = config.get("mirror", {})
+    mirror_path = mirror_section.get("path", "/var/lib/hornethunter/mirror.json")
+
+    master_config = MasterConfig.from_toml(config)
+    mirror = ConfigMirror(mirror_path)
+    carrier_url = require(config, "carrier", "serial_url")
+    carrier = SerialCarrier(str(carrier_url))
+    master = Master(carrier, master_config, mirror)
+
+    def loop() -> None:
+        while True:
+            master.step(int(time.monotonic() * 1000))
+            time.sleep(0.01)
+
+    threading.Thread(target=loop, daemon=True).start()
+    app = create_app(master, log_path=log_path)
+    print(f"hornethunter-management: serving UI on {listen}:{port}")
+    app.run(host=str(listen), port=int(port))
     return 0
 
 

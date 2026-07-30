@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HornetHunter — Management</title>
+  <style>
+    /* All styling is inline; no external fonts, tiles or CDN assets (A5). */
+    :root { color-scheme: light dark; }
+    body { font-family: ui-monospace, "Courier New", monospace; margin: 1rem; }
+    h1 { font-size: 1.2rem; }
+    h2 { font-size: 1rem; margin-top: 1.5rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #8888; padding: 2px 6px; text-align: right; font-variant-numeric: tabular-nums; }
+    th:first-child, td:first-child { text-align: left; }
+    .dot { display: inline-block; width: 0.8em; height: 0.8em; border-radius: 50%; vertical-align: middle; }
+    .green { background: #2e7d32; } .orange { background: #ef6c00; }
+    .red { background: #c62828; } .lost { background: #333; }
+    .in_sync { background: #2e7d32; } .diverged { background: #6a1b9a; }
+    .latched { background: #6a1b9a; outline: 2px solid #c62828; }
+    .pending { background: #1565c0; } .unknown { background: #777; } .kraken_down { background: #ef6c00; }
+    .stale { opacity: 0.5; }
+    .warn { color: #c62828; }
+    fieldset { margin: 0.5rem 0; }
+    label { display: inline-block; min-width: 16rem; }
+    #log { height: 12rem; overflow: auto; border: 1px solid #8888; padding: 4px; white-space: pre; font-size: 0.8rem; }
+    button { margin: 1px; }
+  </style>
+</head>
+<body>
+  <h1>HornetHunter — Management (numeric)</h1>
+
+  <h2>Stations</h2>
+  <table id="stations">
+    <thead>
+      <tr>
+        <th>Station</th><th>Carrier</th><th>Bearing°</th><th>Conf</th><th>Pwr dBm</th>
+        <th>Age ms</th><th>Discards</th><th>Health</th><th>Retry n/rate</th>
+        <th>RTT ms</th><th>RSSI</th><th>Cfg ver</th><th>Config</th>
+      </tr>
+    </thead>
+    <tbody><!-- filled by app.js from /api/state --></tbody>
+  </table>
+
+  <h2>Per-station actions</h2>
+  {% for spec in stations %}
+  <fieldset data-addr="{{ spec.addr }}">
+    <legend>{{ spec.name }} (addr {{ spec.addr }})</legend>
+    <button class="act" data-action="full_read">Read full</button>
+    <button class="act" data-action="full_push">Push full</button>
+    <button class="act" data-action="revert">Revert to last known good</button>
+    Pin:
+    <button class="pin" data-carrier="wlan">WLAN</button>
+    <button class="pin" data-carrier="lora">LoRa</button>
+    <button class="pin" data-carrier="">Auto</button>
+  </fieldset>
+  {% endfor %}
+
+  <h2>Settings (generated from the field registry)</h2>
+  {% for panel in panels %}
+  <fieldset>
+    <legend>{{ panel.name }}</legend>
+    {% for f in panel.fields %}
+    <div>
+      <label class="{{ 'warn' if f.warn else '' }}">
+        {{ f.spec.key }}{% if f.spec.unit %} [{{ f.spec.unit }}]{% endif %}
+        {% if f.warn %}(system-critical){% endif %}
+      </label>
+      {% if f.spec.type == 'enum' %}
+        <select data-key="{{ f.spec.key }}" data-type="enum">
+          {% for opt in f.spec.enum_values %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}
+        </select>
+      {% elif f.spec.type == 'bool' %}
+        <input type="checkbox" data-key="{{ f.spec.key }}" data-type="bool">
+      {% else %}
+        <input type="text" data-key="{{ f.spec.key }}" data-type="{{ f.spec.type }}">
+      {% endif %}
+      <button class="field-apply" data-key="{{ f.spec.key }}">Apply delta</button>
+    </div>
+    {% endfor %}
+  </fieldset>
+  {% endfor %}
+
+  <h2>Log tail</h2>
+  <div id="log"></div>
+
+  <script>
+    // Applies to the station selected by the closest fieldset; v1 keeps this minimal.
+    let currentAddr = null;
+    const tbody = document.querySelector('#stations tbody');
+
+    function dot(cls) { return '<span class="dot ' + cls + '"></span>'; }
+
+    async function refresh() {
+      const r = await fetch('/api/state');
+      const data = await r.json();
+      tbody.innerHTML = '';
+      for (const s of data.stations) {
+        currentAddr = currentAddr === null ? s.addr : currentAddr;
+        const h = s.health, c = s.config;
+        const stale = (s.wall_age_ms !== null && s.wall_age_ms > 5000) ? 'stale' : '';
+        const tr = document.createElement('tr');
+        tr.className = stale;
+        tr.innerHTML =
+          '<td>' + s.name + (s.pinned ? ' [pin:' + s.pinned + ']' : '') + '</td>' +
+          '<td>' + s.carrier + '</td>' +
+          '<td>' + (s.bearing_deg ?? '—') + '</td>' +
+          '<td>' + (s.confidence ?? '—') + '</td>' +
+          '<td>' + (s.power_dbm ?? '—') + '</td>' +
+          '<td>' + (s.age_ms ?? '—') + '</td>' +
+          '<td>' + s.discards + '</td>' +
+          '<td>' + dot(h.state) + ' ' + h.state + (h.warming_up ? ' (warming)' : '') +
+            ' @' + h.carrier + '</td>' +
+          '<td>' + h.retry_count + ' / ' + h.retry_rate + '</td>' +
+          '<td>' + (h.rtt_ms ?? '—') + '</td>' +
+          '<td>' + (h.last_rssi_dbm ?? '—') + '</td>' +
+          '<td>' + c.config_version + '</td>' +
+          '<td>' + dot(c.latched ? 'latched' : c.state) + ' ' + c.state +
+            ' @' + c.carrier + '</td>';
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function refreshLog() {
+      const r = await fetch('/api/log/tail?n=100');
+      const data = await r.json();
+      document.getElementById('log').textContent = data.lines.join('\n');
+    }
+
+    document.querySelectorAll('.field-apply').forEach(b => b.addEventListener('click', async () => {
+      const wrap = b.parentElement.querySelector('[data-key]');
+      let value = wrap.type === 'checkbox' ? wrap.checked : wrap.value;
+      const key = b.dataset.key;
+      const r = await fetch('/api/station/' + currentAddr + '/field', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({key, value})
+      });
+      const res = await r.json();
+      if (res.warn) alert('Warning: ' + key + ' is system-critical (change still sent).');
+      if (!res.ok) alert('Rejected: ' + res.error);
+    }));
+
+    document.querySelectorAll('.act').forEach(b => b.addEventListener('click', async () => {
+      const addr = b.closest('fieldset').dataset.addr;
+      await fetch('/api/station/' + addr + '/' + b.dataset.action, {method: 'POST'});
+    }));
+
+    document.querySelectorAll('.pin').forEach(b => b.addEventListener('click', async () => {
+      const addr = b.closest('fieldset').dataset.addr;
+      await fetch('/api/station/' + addr + '/pin', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({carrier: b.dataset.carrier})
+      });
+    }));
+
+    // Prefer a WebSocket push (<250 ms, NFR-14.1); poll as a fallback.
+    try {
+      const ws = new WebSocket('ws://' + location.host + '/ws');
+      ws.onmessage = (ev) => {
+        const data = JSON.parse(ev.data);
+        tbody.dispatchEvent(new Event('x'));
+        refresh();
+      };
+    } catch (e) { /* fall through to polling */ }
+    setInterval(refresh, 1000);
+    setInterval(refreshLog, 2000);
+    refresh(); refreshLog();
+  </script>
+</body>
+</html>
