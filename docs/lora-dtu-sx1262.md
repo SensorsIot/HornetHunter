@@ -11,8 +11,12 @@ project.
 > - ⚠️ **inferred / unverified** — needs a measurement before it is relied upon
 >
 > Sources: [Waveshare USB-TO-LoRa-xF wiki](https://www.waveshare.com/wiki/USB-TO-LoRa-xF),
-> the shipped `sscom` presets in [SX1262-LoRa-DTU-sscom5.13.1-en/](SX1262-LoRa-DTU-sscom5.13.1-en/),
-> and direct AT probing over the workbench.
+> the shipped `sscom` presets, and direct AT probing over the workbench.
+>
+> The vendor's `sscom` bundle is **not** kept in the tree — everything useful was
+> extracted into this document. The four `sscom51.ini` preset files are recoverable
+> from commit `63dcdb9` (`git show 63dcdb9 -- docs/SX1262-LoRa-DTU-sscom5.13.1-en/`)
+> if the raw originals are ever needed.
 
 > **Correction notice.** An earlier revision of this document concluded that AT
 > configuration mode was unreachable over the wire and required a hardware config
