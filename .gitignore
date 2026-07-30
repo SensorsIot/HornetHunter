@@ -23,3 +23,6 @@ htmlcov/
 
 # Vendor tooling binaries (the .ini presets are kept; the Windows .exe is not)
 docs/**/*.exe
+
+# Unrelated local test material, not part of HornetHunter
+ebook/
