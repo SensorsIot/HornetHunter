@@ -1,0 +1,22 @@
+# Secrets
+**/credentials.py
+.env
+
+# Claude Code
+agents.md
+claude.md
+.claude/
+.claude-data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
