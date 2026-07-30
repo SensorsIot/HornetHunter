@@ -37,7 +37,7 @@ def _full_settings() -> dict[str, Any]:
         "vfo_bw_0": 12500.0,
         "vfo_squelch_0": -40,
         "vfo_squelch_mode_0": "Default",
-        "vfo_demod_0": "None",
+        "vfo_demod_0": "Default",
         "station_id": "kraken-07",
         "location_source": "Static",
         "doa_data_format": "Kraken Pro Local",

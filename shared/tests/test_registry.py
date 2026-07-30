@@ -33,7 +33,7 @@ SETTINGS = {
     "vfo_bw_0": 12_500.0,
     "vfo_squelch_0": -60,
     "vfo_squelch_mode_0": "Default",
-    "vfo_demod_0": "None",
+    "vfo_demod_0": "Default",
     "station_id": "hb9bla-st4",
     "location_source": "gpsd",
     "latitude": 47.3769,

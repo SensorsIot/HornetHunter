@@ -103,7 +103,7 @@ FIELD_REGISTRY: tuple[FieldSpec, ...] = (
     FieldSpec(23, "vfo_bw_0", "fixed", 1, unit="Hz"),
     FieldSpec(24, "vfo_squelch_0", "i16", unit="dB"),
     FieldSpec(25, "vfo_squelch_mode_0", "enum", enum_values=("Default", "Manual", "Auto")),
-    FieldSpec(26, "vfo_demod_0", "enum", enum_values=("None", "FM", "AM")),
+    FieldSpec(26, "vfo_demod_0", "enum", enum_values=("Default", "FM", "AM")),
     FieldSpec(27, "station_id", "str"),
     FieldSpec(28, "location_source", "enum", enum_values=("None", "Static", "gpsd")),
     FieldSpec(29, "latitude", "fixed", 1_000_000, crc_covered=False, unit="deg"),
