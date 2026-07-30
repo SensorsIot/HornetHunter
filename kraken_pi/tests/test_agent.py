@@ -1,4 +1,8 @@
-"""Station agent tests (FSD §2.1, §9, §10, §13) over an in-process link."""
+"""Station agent tests (FSD §2.1, §5, §9, §10, §13) over an in-process link.
+
+The station streams bearings autonomously (§5) and receives the master's
+configuration traffic; it is never polled.
+"""
 
 from __future__ import annotations
 
@@ -12,12 +16,11 @@ from hornethunter_shared.carrier import InProcessLink
 from hornethunter_shared.frame import Frame, FrameReader, MsgType
 from hornethunter_shared.geo import LatLon
 from hornethunter_shared.messages import FLAG_NO_DATA
-from hornethunter_shared.protocol import AckPayload, PollPayload
+from hornethunter_shared.protocol import AckPayload
 from hornethunter_shared.registry import canonical_crc, encode_delta
 
-MASTER = 1
+MASTER = 0xFF
 STATION = 5
-SLOT = 1
 REF = LatLon(47.0, 8.0)
 
 
@@ -38,24 +41,17 @@ def _agent(link: InProcessLink, source: DoaSource, settings: KrakenSettings) -> 
         config={},
         source=source,
         settings=settings,
-        slot_index=SLOT,
         address=STATION,
         reference=REF,
         clock=_clock,
     )
 
 
-def _poll(expected_bit: int, seq: int = 7) -> bytes:
-    payload = PollPayload(cycle_seq=1, slot_ms=150, expected=expected_bit).encode()
-    return Frame(MsgType.POLL, dest=STATION, src=MASTER, seq=seq, payload=payload).encode()
+def _frames(link: InProcessLink) -> list[Frame]:
+    return FrameReader().feed(link.a.recv())
 
 
-def _first_frame(link: InProcessLink) -> Frame | None:
-    frames = FrameReader().feed(link.a.recv())
-    return frames[0] if frames else None
-
-
-def test_poll_for_our_slot_yields_a_decodable_bearing(
+def test_step_streams_a_decodable_bearing(
     full_settings: dict[str, Any], transport_factory: Any
 ) -> None:
     link = InProcessLink()
@@ -63,27 +59,13 @@ def test_poll_for_our_slot_yields_a_decodable_bearing(
     source = SyntheticSource(clock=_clock, latitude=47.0, longitude=8.0)
     agent = _agent(link, source, settings)
 
-    link.a.send(_poll(1 << SLOT))
-    agent.step()
+    agent.step()  # streams autonomously — no poll
 
-    frame = _first_frame(link)
-    assert frame is not None
-    assert frame.msg_type == MsgType.BEARING
-    report = decode_bearing(frame.payload, station_id="kraken-07", reference=REF)
+    bearings = [f for f in _frames(link) if f.msg_type == MsgType.BEARING]
+    assert len(bearings) == 1
+    report = decode_bearing(bearings[0].payload, station_id="kraken-07", reference=REF)
     assert report.has_data
     assert report.config_crc == canonical_crc(full_settings)
-
-
-def test_poll_for_another_slot_is_ignored(
-    full_settings: dict[str, Any], transport_factory: Any
-) -> None:
-    link = InProcessLink()
-    settings = KrakenSettings(transport_factory(full_settings))
-    agent = _agent(link, SyntheticSource(clock=_clock), settings)
-
-    link.a.send(_poll(1 << (SLOT + 1)))  # a different station's slot
-    agent.step()
-    assert _first_frame(link) is None
 
 
 def test_param_delta_applied_once_and_acked_with_crc(
@@ -99,23 +81,22 @@ def test_param_delta_applied_once_and_acked_with_crc(
 
     link.a.send(frame.encode())
     agent.step()
-    ack = _first_frame(link)
-    assert ack is not None and ack.msg_type == MsgType.ACK
-    parsed = AckPayload.decode(ack.payload)
-    expected_crc = canonical_crc({**full_settings, "uniform_gain": 30})
-    assert parsed.config_crc == expected_crc
+    acks = [f for f in _frames(link) if f.msg_type == MsgType.ACK]
+    assert len(acks) == 1
+    parsed = AckPayload.decode(acks[0].payload)
+    assert parsed.config_crc == canonical_crc({**full_settings, "uniform_gain": 30})
     assert transport.settings["uniform_gain"] == 30
 
     # Retransmission of the same frame: re-ACKed, applied only once (FR-10.7).
     writes_before = transport.writes
     link.a.send(frame.encode())
     agent.step()
-    ack2 = _first_frame(link)
-    assert ack2 is not None and ack2.msg_type == MsgType.ACK
+    acks2 = [f for f in _frames(link) if f.msg_type == MsgType.ACK]
+    assert len(acks2) == 1
     assert transport.writes == writes_before  # no second apply
 
 
-def test_answers_polls_with_no_data_when_source_unavailable(
+def test_streams_no_data_when_source_unavailable(
     full_settings: dict[str, Any], transport_factory: Any
 ) -> None:
     link = InProcessLink()
@@ -124,12 +105,10 @@ def test_answers_polls_with_no_data_when_source_unavailable(
     assert source.available is False
     agent = _agent(link, source, settings)
 
-    link.a.send(_poll(1 << SLOT))
-    agent.step()
+    agent.step()  # heartbeat stream even with no measurement (§9.6)
 
-    frame = _first_frame(link)
-    assert frame is not None
-    assert frame.msg_type == MsgType.BEARING
-    report = decode_bearing(frame.payload, station_id="kraken-07", reference=REF)
+    bearings = [f for f in _frames(link) if f.msg_type == MsgType.BEARING]
+    assert len(bearings) == 1
+    report = decode_bearing(bearings[0].payload, station_id="kraken-07", reference=REF)
     assert not report.has_data
     assert report.flags & FLAG_NO_DATA

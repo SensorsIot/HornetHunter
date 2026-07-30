@@ -182,11 +182,10 @@ def station_payload(master: Master, addr: int) -> dict[str, Any]:
         "health": {
             "state": health.state.value,
             "carrier": state.carrier.value,
-            "warming_up": health.warming_up,
-            "retry_count": health.retry_count,
-            "retry_rate": round(health.retry_rate, 3),
-            "consecutive_misses": health.consecutive_misses,
-            "rtt_ms": health.rtt_ms,
+            "time_since_last_s": (
+                None if health.time_since_last_s is None else round(health.time_since_last_s, 2)
+            ),
+            "rate_hz": round(health.rate_hz, 2),
             "last_rssi_dbm": health.last_rssi_dbm,
         },
         "config": {

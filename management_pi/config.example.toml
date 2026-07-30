@@ -14,19 +14,20 @@ promote_probes = 3
 demote_probes = 2
 dwell_s = 30.0
 
-[cycle]
-period_ms = 1000
-guard_ms = 40
-slot_ms = 150
-
+# Configuration ARQ (§10.5) — the ONLY acknowledged path. Bearings stream
+# unacknowledged (§5). The 1000 ms timeout fits the measured ~215 ms/frame airtime.
 [arq]
-timeout_ms = 400
-max_attempts = 3
+timeout_ms = 1000
+max_attempts = 5
 
+# Health (§8) is staleness-based: RED when no bearing arrives for longer than
+# staleness_threshold_s; optional ORANGE below orange_rate_fraction of the expected
+# bearing rate measured over rate_window_s.
 [health]
-window_cycles = 20
-retry_rate_threshold = 0.20
-stale_cycles = 5
+staleness_threshold_s = 1.0
+rate_window_s = 10.0
+expected_rate_hz = 2.3
+orange_rate_fraction = 0.5
 
 [link]
 # Append RSSI to received frames (display only, NFR-8.1; affects framing, FR-10.4).
@@ -39,19 +40,17 @@ path = "/var/log/hornethunter/management.jsonl"
 # Per-station configuration mirror, persisted across restarts (FR-7.9).
 path = "/var/lib/hornethunter/mirror.json"
 
-# One [[station]] table per station. `address` is the HH-Link address (§18.2);
-# `slot_index` is its fixed reply slot (FR-5.2). `reference_lat`/`reference_lon`
-# are the per-station reference for decimetre position offsets (§9.4).
+# One [[station]] table per station. `address` is the HH-Link address (§18.2).
+# `reference_lat`/`reference_lon` are the per-station reference for decimetre
+# position offsets (§9.4). Stations stream bearings autonomously — no slots (§5).
 [[station]]
 address = 1
 name = "kraken-01"
-slot_index = 0
 reference_lat = 47.3769
 reference_lon = 8.5417
 
 [[station]]
 address = 2
 name = "kraken-02"
-slot_index = 1
 reference_lat = 47.3769
 reference_lon = 8.5417

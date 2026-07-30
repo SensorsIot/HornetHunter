@@ -111,8 +111,8 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
         config,
         source,
         settings,
-        slot_index=int(_get("station", "slot_index", 0)),
-        address=int(_get("link", "address", 2)),
+        address=int(_get("link", "address", 1)),
+        max_rate_hz=float(_get("stream", "max_rate_hz", 5.0)),
     )
     print(f"hornethunter-kraken: station {require(config, 'station', 'id')} running")
     agent.run_forever()

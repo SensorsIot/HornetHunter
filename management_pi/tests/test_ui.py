@@ -15,7 +15,7 @@ def build_master(tmp_path: Path) -> Master:
     link = InProcessLink()
     mirror = ConfigMirror(tmp_path / "mirror.json")
     mirror.seed(ADDR, full_settings(uniform_gain=1), version=0)
-    config = MasterConfig(stations=(StationSpec(addr=ADDR, name="s1", slot_index=0),))
+    config = MasterConfig(stations=(StationSpec(addr=ADDR, name="s1"),))
     return Master(link.a, config, mirror)
 
 

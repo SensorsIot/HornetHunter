@@ -35,8 +35,8 @@
     <thead>
       <tr>
         <th>Station</th><th>Carrier</th><th>Bearing°</th><th>Conf</th><th>Pwr dBm</th>
-        <th>Age ms</th><th>Discards</th><th>Health</th><th>Retry n/rate</th>
-        <th>RTT ms</th><th>RSSI</th><th>Cfg ver</th><th>Config</th>
+        <th>Age ms</th><th>Discards</th><th>Health</th><th>Last brg</th>
+        <th>Rate</th><th>RSSI</th><th>Cfg ver</th><th>Config</th>
       </tr>
     </thead>
     <tbody><!-- filled by app.js from /api/state --></tbody>
@@ -109,10 +109,9 @@
           '<td>' + (s.power_dbm ?? '—') + '</td>' +
           '<td>' + (s.age_ms ?? '—') + '</td>' +
           '<td>' + s.discards + '</td>' +
-          '<td>' + dot(h.state) + ' ' + h.state + (h.warming_up ? ' (warming)' : '') +
-            ' @' + h.carrier + '</td>' +
-          '<td>' + h.retry_count + ' / ' + h.retry_rate + '</td>' +
-          '<td>' + (h.rtt_ms ?? '—') + '</td>' +
+          '<td>' + dot(h.state) + ' ' + h.state + ' @' + h.carrier + '</td>' +
+          '<td>' + (h.time_since_last_s ?? '—') + ' s</td>' +
+          '<td>' + h.rate_hz + ' Hz</td>' +
           '<td>' + (h.last_rssi_dbm ?? '—') + '</td>' +
           '<td>' + c.config_version + '</td>' +
           '<td>' + dot(c.latched ? 'latched' : c.state) + ' ' + c.state +

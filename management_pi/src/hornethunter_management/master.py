@@ -1,12 +1,12 @@
 """Master loop wiring (FSD §2.1, and the L2 chapters it drives).
 
-`Master` drives the `PollScheduler` (§5) over a `Carrier` (§15.2) with a
-`StopAndWaitSender` (§10.5) per station, decodes incoming BEARING frames (§9.3),
-feeds per-cycle outcomes to the `HealthEvaluator` (§8) and runs the
-`ParameterDistributor` (§7) for pending changes. It maintains a state store —
-latest bearing, health, carrier and configuration state per station — for the UI
-to read (§14). `step(now_ms)` advances the whole machine off an injected clock so
-it is host-testable over `InProcessLink` (§24.1).
+`Master` **receives** streamed BEARING frames (§5, §9.3) over a `Carrier` (§15.2),
+feeds each arrival to the `HealthEvaluator` (§8, staleness) and the UI state store,
+and runs the `ParameterDistributor` (§7) over a `StopAndWaitSender` (§10.5) per
+station for the acknowledged **configuration** path — the only traffic the master
+initiates. Bearings are never polled for and never acknowledged. `step(now_ms)`
+advances the machine off an injected clock so it is host-testable over
+`InProcessLink` (§24.1).
 """
 
 from __future__ import annotations
@@ -19,17 +19,20 @@ from typing import Any
 from hornethunter_shared.arq import StopAndWaitSender, TxEvent
 from hornethunter_shared.bearing import decode_bearing
 from hornethunter_shared.carrier import Carrier
-from hornethunter_shared.frame import Frame, FrameReader, MsgType
+from hornethunter_shared.frame import FrameReader, MsgType
 from hornethunter_shared.geo import LatLon
 from hornethunter_shared.messages import BearingReport
 from hornethunter_shared.protocol import AckPayload, Reassembler
 from hornethunter_shared.registry import decode_delta
 
-from .health import CycleOutcome, HealthEvaluator, HealthSnapshot
+from .health import HealthEvaluator, HealthSnapshot
 from .mirror import ConfigMirror
 from .param_dist import ConfigSnapshot, ParameterDistributor, PendingPush
-from .scheduler import BROADCAST_ADDR, CycleTiming, PollScheduler
 from .transport import CarrierKind, TransportSelector
+
+# The master's HH-Link address (§18.2): 0xFFFF-class broadcast — it hears every
+# station's stream and its config frames reach every station.
+BROADCAST_ADDR = 0xFF
 
 
 @dataclass(frozen=True)
@@ -38,7 +41,6 @@ class StationSpec:
 
     addr: int
     name: str
-    slot_index: int
     reference: LatLon | None = None
 
 
@@ -48,12 +50,15 @@ class MasterConfig:
     build one directly."""
 
     stations: tuple[StationSpec, ...]
-    timing: CycleTiming = CycleTiming(period_ms=1000, guard_ms=40, slot_ms=150)
-    arq_timeout_ms: int = 400
-    arq_max_attempts: int = 3
-    window_cycles: int = 20
-    retry_rate_threshold: float = 0.20
-    stale_cycles: int = 5
+    # Health (§8): staleness-based, fed by bearing arrivals.
+    staleness_threshold_s: float = 1.0
+    rate_window_s: float = 10.0
+    expected_rate_hz: float = 2.3
+    orange_rate_fraction: float = 0.5
+    # Configuration ARQ (§10.5): the only acknowledged path.
+    arq_timeout_ms: int = 1000
+    arq_max_attempts: int = 5
+    # Transport selection (§6).
     promote_probes: int = 3
     demote_probes: int = 2
     dwell_s: float = 30.0
@@ -64,7 +69,7 @@ class MasterConfig:
     def from_toml(cls, config: dict[str, Any]) -> MasterConfig:
         """Build from a parsed management TOML (§19.2)."""
         stations: list[StationSpec] = []
-        for index, entry in enumerate(config.get("station", [])):
+        for entry in config.get("station", []):
             ref = None
             if "reference_lat" in entry and "reference_lon" in entry:
                 ref = LatLon(float(entry["reference_lat"]), float(entry["reference_lon"]))
@@ -72,26 +77,20 @@ class MasterConfig:
                 StationSpec(
                     addr=int(entry["address"]),
                     name=str(entry.get("name", f"station-{entry['address']}")),
-                    slot_index=int(entry.get("slot_index", index)),
                     reference=ref,
                 )
             )
-        cycle = config.get("cycle", {})
-        arq = config.get("arq", {})
         health = config.get("health", {})
+        arq = config.get("arq", {})
         carrier = config.get("carrier", {})
         return cls(
             stations=tuple(stations),
-            timing=CycleTiming(
-                period_ms=int(cycle.get("period_ms", 1000)),
-                guard_ms=int(cycle.get("guard_ms", 40)),
-                slot_ms=int(cycle.get("slot_ms", 150)),
-            ),
-            arq_timeout_ms=int(arq.get("timeout_ms", 400)),
-            arq_max_attempts=int(arq.get("max_attempts", 3)),
-            window_cycles=int(health.get("window_cycles", 20)),
-            retry_rate_threshold=float(health.get("retry_rate_threshold", 0.20)),
-            stale_cycles=int(health.get("stale_cycles", 5)),
+            staleness_threshold_s=float(health.get("staleness_threshold_s", 1.0)),
+            rate_window_s=float(health.get("rate_window_s", 10.0)),
+            expected_rate_hz=float(health.get("expected_rate_hz", 2.3)),
+            orange_rate_fraction=float(health.get("orange_rate_fraction", 0.5)),
+            arq_timeout_ms=int(arq.get("timeout_ms", 1000)),
+            arq_max_attempts=int(arq.get("max_attempts", 5)),
             promote_probes=int(carrier.get("promote_probes", 3)),
             demote_probes=int(carrier.get("demote_probes", 2)),
             dwell_s=float(carrier.get("dwell_s", 30.0)),
@@ -114,17 +113,6 @@ class StationState:
 
 
 @dataclass
-class _CycleTracker:
-    """Per-station bookkeeping for the poll cycle in progress."""
-
-    filled: bool = False
-    retried: bool = False
-    finalized: bool = False
-    retransmissions: int = 0
-    poll_sent_ms: int = 0
-
-
-@dataclass
 class _StationRuntime:
     sender: StopAndWaitSender
     health: HealthEvaluator
@@ -132,11 +120,11 @@ class _StationRuntime:
     outbox: deque[tuple[MsgType, bytes, PendingPush | None]] = field(default_factory=deque)
     inflight: PendingPush | None = None
     desired: dict[str, Any] | None = None
-    cycle: _CycleTracker = field(default_factory=_CycleTracker)
 
 
 class Master:
-    """Composition root for the poll cycle, health, transport and parameters."""
+    """Composition root: bearing ingest, staleness health, transport and the
+    acknowledged configuration path."""
 
     def __init__(
         self,
@@ -151,10 +139,6 @@ class Master:
         self.mirror = mirror
         self.logger = logger
         self._reader = FrameReader(rssi_appended=config.rssi_appended)
-        ordered = sorted(config.stations, key=lambda s: s.slot_index)
-        self.scheduler = PollScheduler(
-            [s.addr for s in ordered], config.timing, master_addr=config.master_addr
-        )
         self.transport = TransportSelector(
             promote_probes=config.promote_probes,
             demote_probes=config.demote_probes,
@@ -163,6 +147,7 @@ class Master:
         self.params = ParameterDistributor(mirror)
         self.states: dict[int, StationState] = {}
         self._runtime: dict[int, _StationRuntime] = {}
+        self._now_s = 0.0
         for spec in config.stations:
             self.states[spec.addr] = StationState(spec=spec)
             self._runtime[spec.addr] = _StationRuntime(
@@ -173,20 +158,18 @@ class Master:
                     max_attempts=config.arq_max_attempts,
                 ),
                 health=HealthEvaluator(
-                    window_cycles=config.window_cycles,
-                    retry_rate_threshold=config.retry_rate_threshold,
-                    stale_cycles=config.stale_cycles,
+                    staleness_threshold_s=config.staleness_threshold_s,
+                    rate_window_s=config.rate_window_s,
+                    expected_rate_hz=config.expected_rate_hz,
+                    orange_rate_fraction=config.orange_rate_fraction,
                 ),
             )
-        self._cycle_active = False
-        self._cycle_deadline_ms = 0
-        self._next_cycle_ms: int | None = None
 
     def _log(self, event: str, **fields: Any) -> None:
         if self.logger is not None:
             self.logger.event(event, **fields)
 
-    # -- operator entry points ---------------------------------------------
+    # -- operator entry points (configuration path) ------------------------
 
     def queue_delta(self, addr: int, desired: dict[str, Any]) -> None:
         """Queue a field edit as a delta into the pending change slot (FR-14.5)."""
@@ -217,17 +200,16 @@ class Master:
         self.states[addr].carrier = self.transport.active(addr)
 
     def on_probe(self, addr: int, success: bool, now_ms: int) -> None:
-        """Feed a WLAN-reachability probe; a carrier change resets the window."""
+        """Feed a WLAN-reachability probe; a carrier change is logged."""
         result = self.transport.on_probe(addr, success, now_ms)
         self.states[addr].carrier = result.active
         if result.changed:
-            self._runtime[addr].health.reset()
             self._log("carrier_switch", station=addr, carrier=result.active.value)
 
     # -- state store for the UI --------------------------------------------
 
     def health_snapshot(self, addr: int) -> HealthSnapshot:
-        return self._runtime[addr].health.snapshot
+        return self._runtime[addr].health.snapshot(self._now_s)
 
     def config_snapshot(self, addr: int) -> ConfigSnapshot:
         return self.params.snapshot(addr)
@@ -235,10 +217,10 @@ class Master:
     # -- the loop ----------------------------------------------------------
 
     def step(self, now_ms: int) -> None:
-        """Advance one tick: drain incoming frames, service ARQ, run the cycle."""
+        """Advance one tick: drain incoming frames, service the configuration ARQ."""
+        self._now_s = now_ms / 1000.0
         self._receive(now_ms)
         self._service_arq(now_ms)
-        self._service_cycle(now_ms)
 
     def _receive(self, now_ms: int) -> None:
         data = self.carrier.recv()
@@ -247,18 +229,18 @@ class Master:
         for frame in self._reader.feed(data):
             self._dispatch(frame, now_ms)
 
-    def _dispatch(self, frame: Frame, now_ms: int) -> None:
+    def _dispatch(self, frame: Any, now_ms: int) -> None:
         if frame.msg_type is MsgType.BEARING:
             self._on_bearing(frame, now_ms)
         elif frame.msg_type is MsgType.ACK:
             self._on_ack(frame, now_ms)
         elif frame.msg_type is MsgType.PARAM_REPORT:
             self._on_param_report(frame)
-        # IDENT and stray POLLs are ignored by the master.
+        # Stray POLL (legacy) and IDENT are ignored by the master.
 
-    def _on_bearing(self, frame: Frame, now_ms: int) -> None:
+    def _on_bearing(self, frame: Any, now_ms: int) -> None:
         addr = frame.src
-        if not self.scheduler.is_configured(addr):
+        if addr not in self.states:
             self._log("unconfigured_frame", src=addr)
             return
         state = self.states[addr]
@@ -270,12 +252,10 @@ class Master:
         state.last_bearing = report
         state.last_bearing_wall = time.time()
         state.carrier = self.transport.active(addr)
-        self.scheduler.record_bearing(addr, now_ms)
-        runtime = self._runtime[addr]
-        runtime.cycle.filled = True
+        self._runtime[addr].health.record_bearing(now_ms / 1000.0, rssi_dbm=report.power_dbm)
         self.params.observe_bearing(addr, report.config_version, report.config_crc)
 
-    def _on_ack(self, frame: Frame, now_ms: int) -> None:
+    def _on_ack(self, frame: Any, now_ms: int) -> None:
         addr = frame.src
         runtime = self._runtime.get(addr)
         if runtime is None:
@@ -299,7 +279,7 @@ class Master:
             if result.auto_push is not None:
                 self._enqueue_push(addr, result.auto_push)
 
-    def _on_param_report(self, frame: Frame) -> None:
+    def _on_param_report(self, frame: Any) -> None:
         addr = frame.src
         runtime = self._runtime.get(addr)
         if runtime is None:
@@ -311,7 +291,7 @@ class Master:
         self.params.on_full_report(addr, settings)
         self._log("param_report", station=addr, fields=len(settings))
 
-    # -- ARQ servicing -----------------------------------------------------
+    # -- configuration ARQ servicing (§10.5) -------------------------------
 
     def _enqueue_push(self, addr: int, push: PendingPush) -> None:
         msg_type = MsgType.PARAM_DELTA if push.kind == "delta" else MsgType.PARAM_FULL
@@ -324,7 +304,6 @@ class Master:
                 event, frame = sender.on_timeout(now_ms)
                 if event is TxEvent.RETRANSMIT and frame is not None:
                     self.carrier.send(frame.encode())
-                    runtime.cycle.retransmissions += 1
                     self._log("arq_retransmit", station=addr, seq=frame.seq)
                 elif event is TxEvent.EXHAUSTED:
                     runtime.inflight = None
@@ -334,10 +313,10 @@ class Master:
                 self._author_delta(addr, runtime)
             if not sender.busy and runtime.outbox:
                 msg_type, payload, push = runtime.outbox.popleft()
-                frame = sender.start(msg_type, payload, now_ms)
+                out = sender.start(msg_type, payload, now_ms)
                 runtime.inflight = push
-                self.carrier.send(frame.encode())
-                self._log("tx", station=addr, type=msg_type.name, seq=frame.seq)
+                self.carrier.send(out.encode())
+                self._log("tx", station=addr, type=msg_type.name, seq=out.seq)
 
     def _author_delta(self, addr: int, runtime: _StationRuntime) -> None:
         desired = runtime.desired
@@ -351,68 +330,3 @@ class Master:
             return
         if push is not None:
             self._enqueue_push(addr, push)
-
-    # -- poll cycle --------------------------------------------------------
-
-    def _service_cycle(self, now_ms: int) -> None:
-        if not self._cycle_active:
-            if self._next_cycle_ms is None or now_ms >= self._next_cycle_ms:
-                self._begin_cycle(now_ms)
-            return
-        if now_ms >= self._cycle_deadline_ms:
-            self._end_cycle(now_ms)
-
-    def _begin_cycle(self, now_ms: int) -> None:
-        frame = self.scheduler.start_cycle(now_ms)
-        self.carrier.send(frame.encode())
-        for runtime in self._runtime.values():
-            runtime.cycle = _CycleTracker(poll_sent_ms=now_ms)
-        self._cycle_active = True
-        span = self.config.timing.guard_ms + len(self.states) * self.config.timing.slot_ms
-        self._cycle_deadline_ms = now_ms + span
-        self._next_cycle_ms = now_ms + self.config.timing.period_ms
-        self._log("poll", cycle_seq=self.scheduler.cycle_seq, jitter_ms=self.scheduler.jitter_ms)
-
-    def _end_cycle(self, now_ms: int) -> None:
-        still_open = False
-        for addr, runtime in self._runtime.items():
-            tracker = runtime.cycle
-            if tracker.finalized:
-                continue
-            if tracker.filled:
-                self._finalize_station(addr, runtime, delivered=True, exhausted=False)
-            elif not tracker.retried:
-                # One unicast retry for the missed station (FR-5.5) before giving up.
-                self.carrier.send(self.scheduler.retry_poll(addr, now_ms).encode())
-                tracker.retried = True
-                tracker.retransmissions += 1
-                self._cycle_deadline_ms = now_ms + self.config.timing.slot_ms
-                still_open = True
-                self._log("poll_retry", station=addr)
-            else:
-                self._finalize_station(addr, runtime, delivered=False, exhausted=True)
-        if not still_open:
-            self._cycle_active = False
-
-    def _finalize_station(
-        self, addr: int, runtime: _StationRuntime, *, delivered: bool, exhausted: bool
-    ) -> None:
-        tracker = runtime.cycle
-        tracker.finalized = True
-        state = self.states[addr]
-        rtt = None
-        rssi = None
-        if delivered and state.last_bearing is not None:
-            rtt = float(state.last_bearing.age_ms)
-            rssi = float(state.last_bearing.power_dbm)
-        runtime.health.add_cycle(
-            CycleOutcome(
-                delivered=delivered,
-                retransmissions=tracker.retransmissions,
-                exhausted=exhausted,
-                rtt_ms=rtt,
-                rssi_dbm=rssi,
-            )
-        )
-        if not delivered:
-            self._log("missed_slot", station=addr)

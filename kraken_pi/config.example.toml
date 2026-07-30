@@ -5,20 +5,27 @@ id = "kraken-01"
 # Antenna array position, WGS84 degrees.
 latitude = 47.3769
 longitude = 8.5417
-# Bearing offset applied to raw KrakenSDR angles, degrees clockwise.
-array_heading_deg = 0.0
 
-[radio]
-# Tag transmitter frequency. Must match the KrakenSDR's `center_freq`.
-frequency_hz = 148_524_000
-sample_rate_hz = 2_400_000
+[carrier]
+# LoRa DTU device node, addressed by stable identity (NFR-15.3), not a ttyACM index.
+serial_url = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXX-if00"
 
-[krakensdr]
-# DoA feed of the KrakenSDR software running on this Pi.
-host = "127.0.0.1"
-port = 8081
+[kraken]
+# DoA source backend: "kraken" (live DoA feed), "simulator", or "synthetic" (bench).
+backend = "kraken"
+ws_url = "ws://127.0.0.1:8021"
 
-[management]
-# Where BearingReports go.
-endpoint = "http://management-pi.local:8000/reports"
-publish_interval_s = 1.0
+[stream]
+# Bearing stream rate cap in Hz (§5, FR-5.3): the station transmits each new DoA
+# estimate but never faster than this. The KrakenSDR DoA cadence is ~2.3 Hz (§12).
+max_rate_hz = 5.0
+
+[link]
+# HH-Link station address (§18.2). `rssi_append` affects framing (FR-10.4).
+address = 1
+rssi_append = false
+
+[bearing]
+# Per-station reference for decimetre position offsets (§9.4).
+reference_lat = 47.3769
+reference_lon = 8.5417

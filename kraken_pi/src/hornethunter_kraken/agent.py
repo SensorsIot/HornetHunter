@@ -1,16 +1,17 @@
-"""Station agent — the poll-answering loop (FSD §2.1, §9, §10, §13).
+"""Station agent — the bearing-streaming loop (FSD §2.1, §5, §9, §10, §13).
 
-The station **never initiates** (§2.1): it reads bytes from the carrier into a
-`FrameReader` and reacts to what the master sends. On a `POLL` addressed to its slot
-it replies with a `BEARING` (the poll response, not ARQ-acked). On a `PARAM_DELTA`
+The station **streams** (§5): on each new direction estimate from its DoA source it
+transmits a `BEARING` autonomously — no poll, no acknowledgement — rate-limited to
+`max_rate_hz` and with a heartbeat so a live station with no signal still shows as
+present. It also **receives** the master's configuration traffic: on a `PARAM_DELTA`
 it applies the change through the settings client and ACKs with the observed config
-version and CRC, using a `DedupReceiver` so a retransmitted delta is applied once
-(FR-10.7). On a `PARAM_REQ` it replies with a fragmented `PARAM_REPORT`.
+version and CRC (a `DedupReceiver` so a retransmitted delta is applied once,
+FR-10.7); on a `PARAM_REQ` it replies with a fragmented `PARAM_REPORT`.
 
-The agent keeps answering polls even when the DoA feed or the settings endpoint is
-down (§2.3, FR-13.4): a dead feed yields a `no_data` record and a dead settings
-endpoint is reported, never crashed. `step(now_ms)` pumps one round and is
-host-testable over `InProcessLink` with a `SyntheticSource` and a `FakeTransport`.
+The agent keeps streaming even when the DoA feed or the settings endpoint is down
+(§2.3, FR-13.4): a dead feed yields a `no_data` record and a dead settings endpoint
+is reported, never crashed. `step(now)` pumps one round and is host-testable over
+`InProcessLink` with a `SyntheticSource` and a `FakeTransport`.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from hornethunter_shared.frame import (
     MsgType,
 )
 from hornethunter_shared.geo import LatLon
-from hornethunter_shared.protocol import PollPayload, fragment
+from hornethunter_shared.protocol import fragment
 from hornethunter_shared.registry import (
     BY_KEY,
     decode_delta,
@@ -42,6 +43,7 @@ from .pipeline import BearingPipeline
 from .settings_client import KrakenSettings
 
 _FRAG_CHUNK = MAX_PAYLOAD - 2  # leave room for the 2-byte fragment header
+MASTER_ADDR = 0xFF  # HH-Link destination for a streamed bearing (§18.2)
 
 
 def _cfg(config: dict[str, Any], section: str, key: str, default: Any) -> Any:
@@ -49,7 +51,7 @@ def _cfg(config: dict[str, Any], section: str, key: str, default: Any) -> Any:
 
 
 class StationAgent:
-    """Wires a carrier, a DoA source and the settings client into the poll loop."""
+    """Wires a carrier, a DoA source and the settings client into the streaming loop."""
 
     def __init__(
         self,
@@ -58,8 +60,9 @@ class StationAgent:
         source: DoaSource,
         settings: KrakenSettings,
         *,
-        slot_index: int,
         address: int,
+        max_rate_hz: float = 5.0,
+        heartbeat_s: float = 0.5,
         reference: LatLon | None = None,
         pipeline: BearingPipeline | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -68,10 +71,13 @@ class StationAgent:
         self._carrier = carrier
         self._source = source
         self._settings = settings
-        self._slot_index = slot_index
         self._address = address
         self._clock = clock
         self._logger = logger
+        self._min_interval = 1.0 / max_rate_hz if max_rate_hz > 0 else 0.0
+        self._heartbeat_s = heartbeat_s
+        self._last_tx = float("-inf")
+        self._last_sent: Measurement | None = None
 
         if reference is None:
             lat = _cfg(config, "bearing", "reference_lat", None)
@@ -95,15 +101,16 @@ class StationAgent:
     # -- loop ----------------------------------------------------------------
 
     def step(self, now: float | None = None) -> None:
-        """Pump one round: advance the source, read the carrier, answer frames."""
+        """Pump one round: advance the source, stream a bearing if due, service config."""
         now = self._clock() if now is None else now
         self._pump_source()
+        self._maybe_stream(now)
         try:
             data = self._carrier.recv()
         except OSError:
             return
         for frame in self._reader.feed(data):
-            self._dispatch(frame, now)
+            self._dispatch(frame)
 
     def run_forever(self, *, idle_s: float = 0.02) -> None:  # pragma: no cover - real loop
         while True:
@@ -123,23 +130,18 @@ class StationAgent:
             self._last_measurement = measurement
             self._pipeline.update(measurement)
 
-    # -- dispatch ------------------------------------------------------------
+    # -- streaming (§5) ------------------------------------------------------
 
-    def _dispatch(self, frame: Frame, now: float) -> None:
-        if frame.msg_type == MsgType.POLL:
-            self._on_poll(frame, now)
-        elif frame.msg_type == MsgType.PARAM_DELTA:
-            self._on_param_delta(frame)
-        elif frame.msg_type == MsgType.PARAM_REQ:
-            self._on_param_req(frame)
-        # Other types (ACK, IDENT, PARAM_FULL/REPORT) are not initiated at a station.
-
-    def _on_poll(self, frame: Frame, now: float) -> None:
-        try:
-            poll = PollPayload.decode(frame.payload)
-        except Exception:  # noqa: BLE001 - a malformed poll is ignored, not fatal
+    def _maybe_stream(self, now: float) -> None:
+        """Transmit a BEARING on a new estimate, rate-limited, plus a heartbeat so a
+        live station with no fresh measurement still shows present (§5, §9.6)."""
+        elapsed = now - self._last_tx
+        if elapsed < self._min_interval:
             return
-        if not poll.expects(self._slot_index):
+        new_measurement = (
+            self._last_measurement is not None and self._last_measurement is not self._last_sent
+        )
+        if not (new_measurement or elapsed >= self._heartbeat_s):
             return
         report = self._pipeline.build(
             config_version=self._settings.config_version,
@@ -148,9 +150,23 @@ class StationAgent:
             now=now,
         )
         payload = encode_bearing(report, self._reference)
-        self._send(Frame(MsgType.BEARING, dest=frame.src, src=self._address,
-                         seq=frame.seq, payload=payload))
+        self._send(
+            Frame(MsgType.BEARING, dest=MASTER_ADDR, src=self._address,
+                  seq=self._tx_seq & 0xFF, payload=payload)
+        )
+        self._tx_seq = (self._tx_seq + 1) & 0xFF
+        self._last_tx = now
+        self._last_sent = self._last_measurement
         self._pipeline.reset_counts()
+
+    # -- config dispatch (received from the master) --------------------------
+
+    def _dispatch(self, frame: Frame) -> None:
+        if frame.msg_type == MsgType.PARAM_DELTA:
+            self._on_param_delta(frame)
+        elif frame.msg_type == MsgType.PARAM_REQ:
+            self._on_param_req(frame)
+        # BEARING/ACK/IDENT are never initiated by the master toward a station.
 
     def _on_param_delta(self, frame: Frame) -> None:
         is_new = self._dedup.accept(frame)
