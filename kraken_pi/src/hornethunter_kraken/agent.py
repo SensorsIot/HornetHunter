@@ -1,4 +1,4 @@
-"""Station agent — the bearing-streaming loop (FSD §2.1, §5, §9, §10, §13).
+"""KrakenProxy — the bearing-streaming loop (FSD §5, §6, §10, §11, §14).
 
 The station **streams** (§5): on each new direction estimate from its DoA source it
 transmits a `BEARING` autonomously — no poll, no acknowledgement — rate-limited to
@@ -50,7 +50,7 @@ def _cfg(config: dict[str, Any], section: str, key: str, default: Any) -> Any:
     return config.get(section, {}).get(key, default)
 
 
-class StationAgent:
+class KrakenProxy:
     """Wires a carrier, a DoA source and the settings client into the streaming loop."""
 
     def __init__(

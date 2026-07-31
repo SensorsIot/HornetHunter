@@ -29,7 +29,7 @@ from .mirror import ConfigMirror
 
 _VFO_SLOT = re.compile(r"^vfo_.+_(\d+)$")
 
-# ACK status flags (§7.7, §13.5). Mirrors the station agent's ACK payload.
+# ACK status flags (§8.7, §14.5). Mirrors the KrakenProxy's ACK payload.
 STATUS_KRAKEN_DOWN = 1 << 0
 STATUS_READ_ONLY = 1 << 1
 

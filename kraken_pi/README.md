@@ -1,4 +1,4 @@
-# Kraken Pi — station agent
+# Kraken Pi — KrakenProxy
 
 Runs on **each** KrakenSDR ground station. Reads direction-of-arrival estimates
 from the locally attached KrakenSDR and publishes them to the Management Pi as

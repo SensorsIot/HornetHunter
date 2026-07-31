@@ -4,7 +4,7 @@ The Management Pi persists, for each station, the current accepted settings, its
 `config_version`, and the previous known-good snapshot, to a JSON file that
 survives restarts (FR-7.9, AT-14). Reverting swaps the current settings back to the
 previous snapshot (§7.6) so a change that breaks the KrakenSDR can always be undone
-— the station agent's command channel is independent of DSP health (§2.3).
+— the KrakenProxy's command channel is independent of DSP health (§2.3).
 """
 
 from __future__ import annotations

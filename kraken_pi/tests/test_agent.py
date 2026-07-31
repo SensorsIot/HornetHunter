@@ -1,4 +1,4 @@
-"""Station agent tests (FSD §2.1, §5, §9, §10, §13) over an in-process link.
+"""KrakenProxy tests (FSD §5, §6, §10, §11, §14) over an in-process link.
 
 The station streams bearings autonomously (§5) and receives the master's
 configuration traffic; it is never polled.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hornethunter_kraken.agent import StationAgent
+from hornethunter_kraken.agent import KrakenProxy
 from hornethunter_kraken.doa_source import DoaSource, SyntheticSource
 from hornethunter_kraken.settings_client import KrakenSettings
 from hornethunter_shared.bearing import decode_bearing
@@ -35,8 +35,8 @@ def _clock() -> float:
     return 1000.0
 
 
-def _agent(link: InProcessLink, source: DoaSource, settings: KrakenSettings) -> StationAgent:
-    return StationAgent(
+def _agent(link: InProcessLink, source: DoaSource, settings: KrakenSettings) -> KrakenProxy:
+    return KrakenProxy(
         link.b,
         config={},
         source=source,

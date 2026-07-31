@@ -1,4 +1,4 @@
-"""Kraken Pi station agent.
+"""Kraken Pi KrakenProxy.
 
 Reads direction-of-arrival estimates from the locally attached KrakenSDR and
 publishes BearingReports to the Management Pi. The KrakenSDR link is not wired
@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run",
         action="store_true",
-        help="run the station agent against the real serial carrier and KrakenSDR",
+        help="run the KrakenProxy against the real serial carrier and KrakenSDR",
     )
     return parser
 
@@ -83,14 +83,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real hardware path
-    """Construct the serial carrier and run the station agent loop (FSD §2.1).
+    """Construct the serial carrier and run the KrakenProxy loop (FSD §5).
 
     Imports the carrier and agent lazily so the host tier — and every other CLI
     path — never needs a serial device or a live KrakenSDR.
     """
     from hornethunter_shared.carrier import SerialCarrier
 
-    from .agent import StationAgent
+    from .agent import KrakenProxy
     from .doa_source import build_source
     from .settings_client import KrakenSettings, UrllibTransport
 
@@ -106,7 +106,7 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
         longitude=float(require(config, "station", "longitude")),
     )
     settings = KrakenSettings(UrllibTransport())
-    agent = StationAgent(
+    agent = KrakenProxy(
         carrier,
         config,
         source,

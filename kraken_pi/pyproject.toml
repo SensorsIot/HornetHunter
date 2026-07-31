@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hornethunter-kraken"
 version = "0.1.0"
-description = "HornetHunter station agent for the Kraken Pi"
+description = "HornetHunter KrakenProxy for the Kraken Pi"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = ["hornethunter-shared", "websocket-client"]
