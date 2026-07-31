@@ -1,11 +1,42 @@
-"""Kraken settings tests (FSD §13): merge + read-back CRC, route probing."""
+"""Kraken settings tests (FSD §14): merge + read-back CRC, route probing, file write."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from hornethunter_kraken.settings_client import STATUS_READ_ONLY, KrakenSettings
 from hornethunter_shared.registry import canonical_crc
+
+
+def test_file_route_writes_atomically_with_ext_upd_flag(
+    tmp_path: Path, full_settings: dict[str, Any], transport_factory: Any
+) -> None:
+    share = tmp_path / "_share"
+    share.mkdir()
+    path = share / "settings.json"
+    path.write_text(json.dumps(full_settings))
+    settings = KrakenSettings(transport_factory(full_settings), settings_path=str(path))
+    assert not settings.read_only  # the file route is available and preferred (§14)
+
+    result = settings.apply_delta({"uniform_gain": 0.5})
+    assert result.applied and not result.read_only
+    written = json.loads(path.read_text())
+    assert written["uniform_gain"] == 0.5
+    assert written["ext_upd_flag"] is True  # the DSP watcher will apply it
+    assert result.config_crc == settings.config_crc
+
+
+def test_file_route_falls_back_to_http_when_dir_missing(
+    tmp_path: Path, full_settings: dict[str, Any], transport_factory: Any
+) -> None:
+    missing = tmp_path / "nope" / "settings.json"  # directory does not exist
+    settings = KrakenSettings(
+        transport_factory(full_settings, json_route=True), settings_path=str(missing)
+    )
+    assert not settings.read_only  # file route rejected -> HTTP json route used
+    assert settings.apply_delta({"uniform_gain": 0.5}).applied
 
 
 def test_apply_delta_merges_and_recomputes_crc_from_readback(

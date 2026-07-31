@@ -16,7 +16,10 @@ host tests run against an in-memory `FakeTransport` with no network.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -24,12 +27,15 @@ from typing import Any, Literal, Protocol
 
 from hornethunter_shared.registry import BY_KEY, canonical_crc
 
-# ACK status bits reported when a push cannot be applied (§13.5, §10.3).
+# ACK status bits reported when a push cannot be applied (§14.5, §10.3).
 STATUS_OK = 0
 STATUS_READ_ONLY = 1 << 0
 STATUS_KRAKEN_DOWN = 1 << 1
 
-RouteKind = Literal["json", "multipart"]
+# Write routes, in preference order. "file" is the vendor-documented programmatic
+# path (§14): an atomic edit of _share/settings.json with ext_upd_flag, picked up by
+# the DSP's 0.5 s watcher. The HTTP routes are fallbacks.
+RouteKind = Literal["file", "json", "multipart"]
 
 
 class HttpTransport(Protocol):
@@ -105,6 +111,7 @@ class KrakenSettings:
         self,
         transport: HttpTransport,
         *,
+        settings_path: str | None = None,
         read_url: str = "http://127.0.0.1:8081/settings.json",
         json_url: str = "http://127.0.0.1:8042/settings",
         multipart_url: str = "http://127.0.0.1:8081/upload?path=/",
@@ -112,6 +119,7 @@ class KrakenSettings:
         logger: Any | None = None,
     ) -> None:
         self._t = transport
+        self._settings_path = settings_path
         self._read_url = read_url
         self._json_url = json_url
         self._multipart_url = multipart_url
@@ -169,6 +177,12 @@ class KrakenSettings:
             self._log("settings_unreachable_at_startup")
             return
         self._recompute_crc()
+        # Prefer the vendor-documented file write (§14) when a settings path is given.
+        if self._settings_path is not None and self._file_writable():
+            self._route = "file"
+            self._route_url = self._settings_path
+            self._log("settings_write_route", route="file", url=self._settings_path)
+            return
         body = _json_bytes(self._settings)
         candidates: tuple[tuple[RouteKind, str], ...] = (
             ("json", self._json_url),
@@ -191,6 +205,31 @@ class KrakenSettings:
             return self._t.post_json(url, body)
         return self._t.post_multipart(url, self._multipart_field, body)
 
+    def _file_writable(self) -> bool:
+        assert self._settings_path is not None
+        directory = os.path.dirname(self._settings_path) or "."
+        return os.path.isdir(directory) and os.access(directory, os.W_OK)
+
+    def _write_file(self, merged: dict[str, Any]) -> None:
+        """Atomically write the merged settings with `ext_upd_flag` (§14): write a
+        temp file, fsync, then rename — so the DSP's 0.5 s watcher never reads a
+        partial file, and never depends on `en_remote_control` or any HTTP route."""
+        assert self._settings_path is not None
+        payload = {**merged, "ext_upd_flag": True}
+        data = json.dumps(payload, indent=2).encode("utf-8")
+        directory = os.path.dirname(self._settings_path) or "."
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".settings-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._settings_path)  # atomic rename (FR-13.1)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            raise
+
     # -- writes (FR-13.1, FR-13.2, FR-13.3) ----------------------------------
 
     def apply_delta(self, changes: dict[str, Any]) -> ApplyResult:
@@ -209,10 +248,17 @@ class KrakenSettings:
         try:
             current = self._read_raw()
             merged = {**current, **changes}
-            status = self._post(self._route, self._route_url, _json_bytes(merged))
-            if status != 200:
-                raise OSError(f"write route returned {status}")
-            readback = self._read_raw()
+            if self._route == "file":
+                self._write_file(merged)
+                # The 0.5 s watcher applies it asynchronously, so an immediate HTTP
+                # read-back would be stale; the merged dict is the authoritative
+                # intended state and the CRC is computed from it (§14).
+                readback = merged
+            else:
+                status = self._post(self._route, self._route_url, _json_bytes(merged))
+                if status != 200:
+                    raise OSError(f"write route returned {status}")
+                readback = self._read_raw()
         except OSError as exc:
             self._log("settings_kraken_down", error=str(exc))
             return ApplyResult(

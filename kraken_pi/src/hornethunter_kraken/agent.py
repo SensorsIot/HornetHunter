@@ -43,6 +43,7 @@ from .doa_source import DoaSource
 from .measurement import Measurement
 from .pipeline import BearingPipeline
 from .settings_client import KrakenSettings
+from .supervisor import Supervisor
 
 _FRAG_CHUNK = MAX_PAYLOAD - 2  # leave room for the 2-byte fragment header
 MASTER_ADDR = 0xFF  # HH-Link destination for a streamed bearing (§18.2)
@@ -70,8 +71,10 @@ class KrakenProxy:
         clock: Callable[[], float] = time.monotonic,
         logger: Any | None = None,
         join_rng: Callable[[], float] = random.random,
+        supervisor: Supervisor | None = None,
     ) -> None:
         self._carrier = carrier
+        self._supervisor = supervisor
         self._source = source
         self._settings = settings
         self._address = address
@@ -126,6 +129,10 @@ class KrakenProxy:
         """Pump one round: advance the source, transmit per schedule, service config."""
         now = self._clock() if now is None else now
         self._pump_source()
+        if self._supervisor is not None:
+            if self._source.available:
+                self._supervisor.note_alive(now)  # DSP reachable (even if squelched)
+            self._supervisor.tick(now)  # bounded autorecovery on a stalled feed (§5.5)
         if self._tdma_enabled:
             self._drain_incoming(now)  # apply a fresh beacon before deciding to transmit
             self._tdma_tick(now)

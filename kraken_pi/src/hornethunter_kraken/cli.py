@@ -93,6 +93,7 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
     from .agent import KrakenProxy
     from .doa_source import build_source
     from .settings_client import KrakenSettings, UrllibTransport
+    from .supervisor import RecoveryPolicy, Supervisor, systemctl_restart
 
     def _get(section: str, key: str, default: Any) -> Any:
         value = config.get(section, {})
@@ -105,7 +106,22 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
         latitude=float(require(config, "station", "latitude")),
         longitude=float(require(config, "station", "longitude")),
     )
-    settings = KrakenSettings(UrllibTransport())
+    settings_path = _get("kraken", "settings_path", None)
+    settings = KrakenSettings(
+        UrllibTransport(),
+        settings_path=str(settings_path) if settings_path else None,
+    )
+    supervisor = None
+    if _get("supervisor", "enabled", False):
+        services = _get("supervisor", "services", ["krakensdr"])
+        supervisor = Supervisor(
+            policy=RecoveryPolicy(
+                stall_after_s=float(_get("supervisor", "stall_after_s", 10.0)),
+                backoff_s=float(_get("supervisor", "backoff_s", 30.0)),
+                max_attempts=int(_get("supervisor", "max_attempts", 3)),
+            ),
+            recover=systemctl_restart(*services),
+        )
     agent = KrakenProxy(
         carrier,
         config,
@@ -113,6 +129,7 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
         settings,
         address=int(_get("link", "address", 1)),
         max_rate_hz=float(_get("stream", "max_rate_hz", 5.0)),
+        supervisor=supervisor,
     )
     print(f"hornethunter-kraken: station {require(config, 'station', 'id')} running")
     agent.run_forever()
