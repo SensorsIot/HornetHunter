@@ -1481,22 +1481,25 @@ Management Pi is re-imaged (its `~/.ssh` does not survive a fresh flash).
 
 ### 19.2 DTU addressing
 
-**All nodes share one channel with the DTU address flat (`AT+ADDR=0`).** Per-node
-addressing is done at the HH-Link layer — the DEST/SRC bytes (§11.2) — not at the
-DTU: every DTU on the channel physically hears every transmission, and each node
-keeps the frames addressed to it and ignores the rest.
+Transparent **Stream mode** (`AT+MODE=1`) is group-addressed, and its `0xFFFF`
+broadcast-monitor address is exactly a master/stations network (verified on
+hardware). The Management Pi's DTU is set to **`0xFFFF`**: its transmissions reach
+every station on the channel, and it receives from every station regardless of
+address. Each station's DTU takes a **distinct** address (`0x0001`, `0x0002`, …), so
+every station hears the master and is heard by it, while being **mutually deaf** to
+the other stations.
 
-The distinct-address scheme the DTU documents (master `0xFFFF`, stations `0x000n`,
-to make stations mutually deaf) is **not used**: measured on our hardware it degrades
-the link (received bearing rate fell from ~1.3 Hz to ~0.3 Hz and the station went
-stale), whereas flat `AT+ADDR=0` is reliable. The master-scheduled TDMA does not need
-DTU-level mutual deafness: exclusive slots (§5, §6) prevent collisions, and a station
-discards frames not addressed to it. A station hearing another's transmissions is
-harmless — the hidden-node assumption (FR-7.4) is about what a node **cannot** rely on
-hearing, not about enforced deafness.
+| Node | DTU `AT+ADDR` | Consequence |
+|------|---------------|-------------|
+| Management Pi | `0xFFFF` | broadcasts to every station; monitors every station's stream |
+| Station *n* | `0x0001`, `0x0002`, … | hears the master's broadcast; heard by the master; deaf to other stations |
 
-The beacon and any master→all frame are HH-Link broadcasts (DEST `0xFF`, §11.2),
-reaching every node in one transmission on the shared channel.
+Measured throughput matches a flat channel (~1.8 Hz, GREEN), so the mutual deafness
+is free — and it enforces the hidden-node assumption (FR-7.4) at the addressing layer
+rather than merely relying on it. The beacon and any master→all frame reach every
+station in one transmission (§5.2); per-station HH-Link addressing (DEST/SRC, §11.2)
+rides on top. **All DTUs must be in Stream mode** (`AT+MODE=1`) — Packet mode
+(`AT+MODE=2`) prefixes an address header the transparent pipe does not emit.
 
 ### 19.3 Slot mapping
 
