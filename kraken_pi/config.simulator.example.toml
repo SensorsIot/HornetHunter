@@ -1,0 +1,69 @@
+# Simulated Kraken station config. Runs the SAME `hornethunter-kraken --run` proxy
+# as a real station, but with the in-process virtual-transmitter simulator instead
+# of a KrakenSDR (§12.3, backend = "virtual"). It drives a real LoRa stick, so on the
+# network it is indistinguishable from a real Kraken — same frames, TDMA slots, and
+# health. Point every simulated station at the SAME [simulator] target and their
+# bearings triangulate onto it. Copy to /etc/hornethunter/kraken.toml on the bench
+# machine and edit. No KrakenSDR, no DoA feed, no settings.json needed.
+
+[station]
+id = "kraken-03"
+# The simulated array's own position (WGS84). Give each station a DISTINCT location,
+# a few hundred metres apart, so their bearings to the target actually cross.
+latitude = 47.3769
+longitude = 8.5450
+
+[carrier]
+# LoRa stick #3 on the bench, by stable id (fill in the real device — see
+# `ls /dev/serial/by-id/`).
+serial_url = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXX-if00"
+
+[dtu]
+# Auto-provision stick #3 at startup (§12): forces MODE=1 (Stream) and ADDR from
+# [link] address, and sets the channel/radio to match the master. MUST match the
+# Management Pi's [dtu] exactly.
+enabled = true
+channel = 24
+sf = 7
+bw = 0
+cr = 1
+power = 22
+
+[kraken]
+# The network simulator: a virtual transmitter, in-process, no hardware (§12.3).
+backend = "virtual"
+
+[simulator]
+# The virtual transmitter every simulated station "hears" (WGS84). Keep it identical
+# across all simulated stations so their bearings converge on one fix.
+target_lat = 47.3800
+target_lon = 8.5430
+# Mild bearing jitter (deg, 1-sigma) and update cadence (Hz) to mimic a real DoA feed.
+bearing_noise_deg = 1.5
+update_rate_hz = 2.3
+# Deterministic noise stream; give each station a different seed for independent jitter.
+seed = 3
+
+[stream]
+max_rate_hz = 5.0
+
+[link]
+# HH-Link / DTU address (§18.2, §19.2) and, under TDMA, this station's slot number.
+address = 3
+rssi_append = false
+
+[bearing]
+# Per-station reference for decimetre position offsets (§9.4) — set to the station
+# position above.
+reference_lat = 47.3769
+reference_lon = 8.5450
+
+[tdma]
+# Master-scheduled TDMA (§5, §6). Geometry MUST match the Management Pi's [tdma].
+enabled = true
+period_ms = 1000
+slot_ms = 125
+guard_ms = 25
+max_slots_per_station = 2
+
+# No [supervisor] section: there is no KrakenSDR to watchdog/restart on a simulator.

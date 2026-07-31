@@ -998,13 +998,23 @@ timestamp advances, so a static file is never re-reported.
 
 ### 13.3 Backends
 
-One internal measurement type, three sources, selected by configuration:
+One internal measurement type, four sources, selected by configuration:
 
 | Backend | Use | Transport |
 |---------|-----|-----------|
 | `kraken` | real hardware | HTTP `GET :8081/DOA_value.html` (CSV) |
+| `virtual` | **network simulator** — a simulated Kraken on real RF, no hardware | in-process virtual transmitter |
 | `simulator` | `KrakenSimulator` | HTTP `GET /api/v1/doa` (JSON) |
 | `synthetic` | host-tier tests, no hardware | in-process generator |
+
+The `virtual` backend runs inside the ordinary `KrakenProxy` in place of a KrakenSDR
+and drives a real LoRa stick, so a station with no hardware is indistinguishable on
+the network from a real one — same frames, TDMA slots, and health. It computes the
+true great-circle bearing from the station's own position to a configured
+`[simulator]` target, adds mild jitter, and emits at the ~2.3 Hz KrakenSDR cadence.
+Point several simulated stations at one target and their bearings triangulate onto
+it: this is how a full **3-Kraken + Management Pi** network is stood up with one real
+Kraken and the rest simulated (`config.simulator.example.toml`).
 
 The simulator emits JSON keyed by name; the real KrakenSDR emits positional CSV. A
 name-keyed adapter maps the simulator record; the CSV is parsed by field position:

@@ -12,8 +12,11 @@ from hornethunter_kraken.doa_source import (
     KrakenSource,
     SimulatorSource,
     SyntheticSource,
+    VirtualTargetSource,
+    build_source,
     parse_doa_csv,
 )
+from hornethunter_shared.geo import LatLon, initial_bearing_deg
 
 # A single-VFO line in the exact KrakenSDR DOA_value.html field order (§12.3):
 # ts_ms, bearing°, conf, power_dBm, freq_Hz, array, latency, station, lat, lon, ...
@@ -57,6 +60,62 @@ def test_synthetic_source_is_deterministic() -> None:
     )
     assert a.available is True
     assert a.produced == 5
+
+
+def test_virtual_source_points_at_the_target() -> None:
+    # Station due south of the target -> bearing ~ north (0 deg), within the jitter.
+    station = LatLon(47.3700, 8.5400)
+    target = LatLon(47.3800, 8.5400)
+    src = VirtualTargetSource(station, target, clock=_fixed_clock(), bearing_noise_deg=0.0)
+    src.pump()
+    m = src.latest()
+    assert m is not None
+    assert abs(m.bearing_deg - initial_bearing_deg(station, target)) < 1e-6
+    assert m.bearing_deg == pytest.approx(0.0, abs=1.0)
+    assert m.latitude == station.lat and m.longitude == station.lon
+    assert src.available is True
+
+
+def test_virtual_source_is_deterministic_for_a_seed() -> None:
+    station, target = LatLon(47.37, 8.54), LatLon(47.39, 8.56)
+    a = VirtualTargetSource(station, target, clock=_fixed_clock(), seed=7)
+    b = VirtualTargetSource(station, target, clock=_fixed_clock(), seed=7)
+    for _ in range(5):
+        a.pump()
+        b.pump()
+    ma, mb = a.latest(), b.latest()
+    assert ma is not None and mb is not None
+    assert ma.bearing_deg == mb.bearing_deg  # same seed -> identical jitter
+
+
+def test_virtual_source_respects_update_rate() -> None:
+    # Clock ticks 0.1 s per pump; at 2.3 Hz (~0.435 s) only every ~5th pump produces.
+    station, target = LatLon(47.37, 8.54), LatLon(47.39, 8.56)
+    src = VirtualTargetSource(
+        station, target, clock=_fixed_clock(start=0.0, step=0.1), update_rate_hz=2.3
+    )
+    for _ in range(20):
+        src.pump()
+    assert 3 <= src.produced <= 6  # ~ 20 * 0.1s * 2.3Hz ≈ 4-5 new measurements
+
+
+def test_distinct_stations_bearings_cross_at_target() -> None:
+    target = LatLon(47.3800, 8.5430)
+    west = VirtualTargetSource(LatLon(47.3769, 8.5417), target, bearing_noise_deg=0.0)
+    east = VirtualTargetSource(LatLon(47.3769, 8.5450), target, bearing_noise_deg=0.0)
+    west.pump()
+    east.pump()
+    mw, me = west.latest(), east.latest()
+    assert mw is not None and me is not None
+    # The two stations see the target on materially different bearings (they cross).
+    assert abs(mw.bearing_deg - me.bearing_deg) > 5.0
+
+
+def test_build_source_virtual_requires_target() -> None:
+    with pytest.raises(ValueError, match="virtual backend needs"):
+        build_source("virtual", latitude=47.0, longitude=8.0)  # no target
+    src = build_source("virtual", latitude=47.0, longitude=8.0, target_lat=47.1, target_lon=8.1)
+    assert isinstance(src, VirtualTargetSource)
 
 
 def test_synthetic_confidence_may_exceed_100() -> None:

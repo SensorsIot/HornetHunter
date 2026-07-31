@@ -108,11 +108,18 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
             f"written={result.written or '{}'} mismatches={result.mismatches or '{}'}"
         )
     carrier = SerialCarrier(carrier_url)
+    sim_target_lat = _get("simulator", "target_lat", None)
+    sim_target_lon = _get("simulator", "target_lon", None)
     source = build_source(
         str(_get("kraken", "backend", "kraken")),
         doa_url=str(_get("kraken", "doa_url", "http://127.0.0.1:8081/DOA_value.html")),
         latitude=float(require(config, "station", "latitude")),
         longitude=float(require(config, "station", "longitude")),
+        target_lat=float(sim_target_lat) if sim_target_lat is not None else None,
+        target_lon=float(sim_target_lon) if sim_target_lon is not None else None,
+        bearing_noise_deg=float(_get("simulator", "bearing_noise_deg", 1.5)),
+        update_rate_hz=float(_get("simulator", "update_rate_hz", 2.3)),
+        seed=int(_get("simulator", "seed", 0)),
     )
     settings_path = _get("kraken", "settings_path", None)
     settings = KrakenSettings(

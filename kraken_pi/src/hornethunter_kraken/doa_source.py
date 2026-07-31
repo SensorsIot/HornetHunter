@@ -22,11 +22,15 @@ from __future__ import annotations
 
 import abc
 import json
+import math
+import random
 import time
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from hornethunter_shared.geo import LatLon, distance_m, initial_bearing_deg, normalize_bearing
 
 from .measurement import Measurement
 
@@ -246,6 +250,68 @@ class SyntheticSource(DoaSource):
         self.produced += 1
 
 
+class VirtualTargetSource(DoaSource):
+    """In-process Kraken **network simulator**: observe a virtual transmitter (§12.3).
+
+    Runs inside the ordinary `KrakenProxy` in place of a real KrakenSDR, so a station
+    with no hardware behaves exactly like a real one on the LoRa network — same
+    frames, same TDMA slots, same health. It computes the true great-circle bearing
+    from the station's own position to a configured target, adds mild Gaussian
+    jitter, and emits a realistic `Measurement` at the KrakenSDR's ~2.3 Hz cadence.
+    Point several simulated stations at the **same** target and their bearings
+    triangulate onto it — a full 3-station + Management Pi network with one real
+    Kraken and the rest simulated. Deterministic for a given `seed`.
+    """
+
+    def __init__(
+        self,
+        station: LatLon,
+        target: LatLon,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        update_rate_hz: float = 2.3,
+        bearing_noise_deg: float = 1.5,
+        freq_hz: float = 148_524_000.0,
+        seed: int = 0,
+    ) -> None:
+        super().__init__()
+        self._station = station
+        self._target = target
+        self._clock = clock
+        self._interval = 1.0 / update_rate_hz if update_rate_hz > 0 else 0.0
+        self._noise = bearing_noise_deg
+        self._freq = freq_hz
+        self._rng = random.Random(seed)
+        self._next_update = 0.0
+        self.available = True
+
+    def pump(self) -> None:
+        now = self._clock()
+        if now < self._next_update:
+            return
+        self._next_update = now + self._interval
+        true_bearing = initial_bearing_deg(self._station, self._target)
+        bearing = normalize_bearing(true_bearing + self._rng.gauss(0.0, self._noise))
+        dist = distance_m(self._station, self._target)
+        # Plausible confidence/power/SNR that fade with range (display only, §9.3).
+        confidence = max(5.0, 100.0 - dist / 20.0) + self._rng.uniform(-3.0, 3.0)
+        power_dbm = -40.0 - 20.0 * math.log10(max(dist, 1.0) / 100.0)
+        self._latest = Measurement(
+            bearing_deg=bearing,
+            confidence=confidence,
+            power_dbm=power_dbm,
+            freq_hz=self._freq,
+            latitude=self._station.lat,
+            longitude=self._station.lon,
+            adc_overdrive=False,
+            squelch_open=True,
+            num_corr_sources=4,
+            snr=max(0.0, 20.0 - dist / 500.0),
+            mono_ts=now,
+        )
+        self.produced += 1
+
+
 class SimulatorSource(DoaSource):
     """`KrakenSimulator` backend over HTTP `GET /api/v1/doa` (§12.3)."""
 
@@ -362,10 +428,28 @@ def build_source(
     clock: Callable[[], float] = time.monotonic,
     latitude: float | None = None,
     longitude: float | None = None,
+    target_lat: float | None = None,
+    target_lon: float | None = None,
+    bearing_noise_deg: float = 1.5,
+    update_rate_hz: float = 2.3,
+    seed: int = 0,
 ) -> DoaSource:
     """Construct the configured backend (§12.3). All present one internal type."""
     if backend == "synthetic":
         return SyntheticSource(clock=clock, latitude=latitude, longitude=longitude)
+    if backend == "virtual":
+        if latitude is None or longitude is None or target_lat is None or target_lon is None:
+            raise ValueError(
+                "virtual backend needs station [station] lat/lon and [simulator] target_lat/lon"
+            )
+        return VirtualTargetSource(
+            LatLon(latitude, longitude),
+            LatLon(target_lat, target_lon),
+            clock=clock,
+            update_rate_hz=update_rate_hz,
+            bearing_noise_deg=bearing_noise_deg,
+            seed=seed,
+        )
     if backend == "simulator":
         return SimulatorSource(sim_url, clock=clock)
     if backend == "kraken":
