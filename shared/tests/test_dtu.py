@@ -38,7 +38,9 @@ class FakeSerial:
             return self.enter.encode()
         if text.startswith("AT+") and text.endswith("?"):
             name = text[3:-1]
-            return f"AT+{name}={self.values.get(name, '')}\r\nOK\r\n".encode()
+            # The real DTU echoes the query first, then the value — the shape that
+            # broke naive parsing on hardware (§12).
+            return f"{text}\r\n+{name}={self.values.get(name, '')}\r\nOK\r\n".encode()
         if text.startswith("AT+") and "=" in text:
             name, _, value = text[3:].partition("=")
             self.values[name] = value
@@ -75,6 +77,20 @@ def test_provisioning_is_idempotent() -> None:
     second = provision(serial, {"MODE": "1", "SF": "9"})
     assert first.written == {}
     assert second.written == {}
+
+
+def test_matching_params_write_nothing_when_the_dtu_echoes() -> None:
+    # Regression (§12): the DTU echoes the query (`AT+MODE?\r\n+MODE=1\r\nOK`). A parser
+    # that grabs the echoed line sees every value as "AT+MODE?", rewrites everything,
+    # and reports false mismatches. With correct parsing an all-matching pass is a
+    # true no-op — exactly what live hardware must show.
+    serial = FakeSerial({"MODE": "1", "ADDR": "1", "TXCH": "24", "SF": "7", "BW": "0"})
+    result = provision(
+        serial, {"MODE": "1", "ADDR": "1", "TXCH": "24", "SF": "7", "BW": "0"}
+    )
+    assert result.written == {}
+    assert result.mismatches == {}
+    assert _written(serial) == []  # not a single AT+X=... write was issued
 
 
 def test_at_mode_not_entered_leaves_dtu_untouched() -> None:

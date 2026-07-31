@@ -84,19 +84,27 @@ def _query(port: SerialLike, name: str) -> str:
 def _parse_value(raw: bytes) -> str:
     """Extract the value from a DTU reply, tolerating the common reply shapes.
 
-    ``7\\r\\nOK`` → ``7``; ``+SF:7`` → ``7``; ``AT+SF=7`` → ``7``.
+    The DTU **echoes the command** with echo enabled, so a query reply is typically
+    ``AT+SF?\\r\\n+SF:7\\r\\nOK`` — the echoed query line (`AT+SF?`) must be skipped or
+    it is mistaken for the value. Handled shapes:
+    ``AT+SF?\\r\\n+SF=7\\r\\nOK`` → ``7``; ``+SF:7`` → ``7``; ``AT+SF?\\r\\n7\\r\\nOK`` →
+    ``7``; ``7\\r\\nOK`` → ``7``.
     """
     text = raw.decode("ascii", errors="replace")
+    fallback = ""
     for line in text.splitlines():
         line = line.strip()
         if not line or line in ("OK", "ERROR"):
             continue
+        if line.endswith("?"):
+            continue  # the echoed query command, e.g. "AT+MODE?"
         if "=" in line:
-            return line.rsplit("=", 1)[1].strip()
+            return line.rsplit("=", 1)[1].strip()  # "+MODE=1" / "AT+MODE=1" -> "1"
         if ":" in line:
-            return line.split(":", 1)[1].strip()
-        return line
-    return ""
+            return line.split(":", 1)[1].strip()  # "+SF:7" -> "7"
+        if not fallback and not line.upper().startswith("AT"):
+            fallback = line  # a bare value like "7", but never an echoed command
+    return fallback
 
 
 def _enter_at(port: SerialLike) -> bool:
