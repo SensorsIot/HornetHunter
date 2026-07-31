@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=krakenrf
-ExecStart=/opt/hornethunter/.venv/bin/hornethunter-kraken --config /etc/hornethunter/kraken.toml
+ExecStart=/opt/hornethunter/.venv/bin/hornethunter-kraken --run --config /etc/hornethunter/kraken.toml
 Restart=on-failure
 RestartSec=5
 # Journal only; the Pi's SD card should not carry a growing log file.
