@@ -1481,19 +1481,22 @@ Management Pi is re-imaged (its `~/.ssh` does not survive a fresh flash).
 
 ### 19.2 DTU addressing
 
-Transparent mode is **group-addressed, not a flat broadcast**: a receiver accepts a
-frame only when both address and channel match the sender — except address `0xFFFF`,
-which receives from all addresses on its channel and whose transmissions reach all
-of them.
+**All nodes share one channel with the DTU address flat (`AT+ADDR=0`).** Per-node
+addressing is done at the HH-Link layer — the DEST/SRC bytes (§11.2) — not at the
+DTU: every DTU on the channel physically hears every transmission, and each node
+keeps the frames addressed to it and ignores the rest.
 
-| Node | DTU `AT+ADDR` | Consequence |
-|------|---------------|-------------|
-| Management Pi | `0xFFFF` | its config frames reach every station; it hears every station's bearings |
-| Station *n* | `0x0001`, `0x0002`, … | stations are **mutually deaf** |
+The distinct-address scheme the DTU documents (master `0xFFFF`, stations `0x000n`,
+to make stations mutually deaf) is **not used**: measured on our hardware it degrades
+the link (received bearing rate fell from ~1.3 Hz to ~0.3 Hz and the station went
+stale), whereas flat `AT+ADDR=0` is reliable. The master-scheduled TDMA does not need
+DTU-level mutual deafness: exclusive slots (§5, §6) prevent collisions, and a station
+discards frames not addressed to it. A station hearing another's transmissions is
+harmless — the hidden-node assumption (FR-7.4) is about what a node **cannot** rely on
+hearing, not about enforced deafness.
 
-A broadcast frame — the beacon (§6.2) — reaches all stations in one transmission,
-while no station hears another's bearing stream, enforcing at the addressing layer
-the hidden-node assumption the schedule already makes (FR-7.4).
+The beacon and any master→all frame are HH-Link broadcasts (DEST `0xFF`, §11.2),
+reaching every node in one transmission on the shared channel.
 
 ### 19.3 Slot mapping
 
