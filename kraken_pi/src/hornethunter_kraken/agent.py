@@ -244,9 +244,15 @@ class KrakenProxy:
         if self._join_sent_seq == self._beacon_seq:
             return
         if elapsed_ms >= self._join_offset_ms:
+            ref = self._reference
+            join = JoinPayload(
+                self._tx_seq & 0xFF,
+                ref.lat if ref is not None else None,
+                ref.lon if ref is not None else None,
+            )
             self._send(
                 Frame(MsgType.JOIN, dest=MASTER_ADDR, src=self._address,
-                      seq=self._tx_seq & 0xFF, payload=JoinPayload(self._tx_seq & 0xFF).encode())
+                      seq=self._tx_seq & 0xFF, payload=join.encode())
             )
             self._tx_seq = (self._tx_seq + 1) & 0xFF
             self._join_sent_seq = self._beacon_seq

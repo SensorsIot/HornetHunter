@@ -445,6 +445,13 @@ map when its bearings go stale past the threshold (§9); the slot frees and the 
 compacts. Configuration for a departed-then-returning station is reconciled on
 rejoin (§8.6, §15).
 
+**Self-configuring network.** The JOIN carries the station's own antenna **reference
+position**, so the master admits a station it has never seen — creating its state
+from the JOIN and decoding its decimetre bearing offsets against the announced
+reference (§9.4). A station joins the network purely by its number; the master's
+`[[station]]` config is therefore **optional**, present only to pin a friendly name
+or a fixed reference. A fresh master learns its whole fleet from the stations' JOINs.
+
 ### 6.4 Requirements
 
 - **FR-6.1** [Must] The Management Pi shall be the sole timing authority, broadcasting
@@ -457,7 +464,10 @@ rejoin (§8.6, §15).
 - **FR-6.4** [Should] A station shall send its most recent estimate in its slot,
   collapsing to the newest when the DoA cadence exceeds its slot rate (Appendix B).
 - **FR-6.5** [Must] A station without a slot shall obtain timing from the beacon and
-  request one via a JOIN in the contention window, backing off on collision.
+  request one via a JOIN in the contention window, backing off on collision. The JOIN
+  shall carry the station's reference position, and the master shall admit a
+  previously-unknown station from its JOIN (self-configuring; `[[station]]` config is
+  optional, §6.3).
 - **FR-6.6** [Must] The master shall derive slots from station numbers (§19),
   compacting so not-live numbers reserve no slot, and shall adapt each station's slot
   count to the live-station load.
@@ -837,7 +847,7 @@ self-delimiting.
 | 0x6 | `PARAM_REQ` | master → station | yes | request full-set report |
 | 0x7 | `PARAM_REPORT` | station → master | yes | full set; fragmented |
 | 0x8 | `IDENT` | station → master | yes | agent version, schema version, capabilities |
-| 0x9 | `JOIN` | station → master | **no — contention** | requesting station number, seeking a slot (§6.3) |
+| 0x9 | `JOIN` | station → master | **no — contention** | requesting station number + reference position, seeking a slot (§6.3) |
 
 Only the configuration exchange (types 0x3–0x8) is acknowledged and retransmitted
 (§11.5). `BEACON`, `BEARING` and `JOIN` are fire-and-forget: the `BEACON` is

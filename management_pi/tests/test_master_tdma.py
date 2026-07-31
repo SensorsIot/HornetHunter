@@ -17,6 +17,13 @@ def _join(src: int) -> bytes:
     return Frame(MsgType.JOIN, dest=0xFF, src=src, seq=0).encode()
 
 
+def _join_with_ref(src: int, lat: float, lon: float) -> bytes:
+    from hornethunter_shared.protocol import JoinPayload
+
+    payload = JoinPayload(nonce=src, ref_lat=lat, ref_lon=lon).encode()
+    return Frame(MsgType.JOIN, dest=0xFF, src=src, seq=0, payload=payload).encode()
+
+
 def build(tmp_path: Path, *, enabled: bool = True) -> tuple[Master, InProcessLink, FrameReader]:
     link = InProcessLink()
     mirror = ConfigMirror(tmp_path / "mirror.json")
@@ -37,6 +44,25 @@ def _beacons(link: InProcessLink, reader: FrameReader) -> list[BeaconPayload]:
         for f in reader.feed(link.b.recv())
         if f.msg_type is MsgType.BEACON
     ]
+
+
+def test_unconfigured_station_self_admits_on_join(tmp_path: Path) -> None:
+    # A master with NO configured stations admits whoever announces itself (§5.3).
+    link = InProcessLink()
+    mirror = ConfigMirror(tmp_path / "mirror.json")
+    master = Master(
+        link.a,
+        MasterConfig(stations=(), tdma_enabled=True, superframe_period_ms=1000,
+                     superframe_slot_ms=125, tdma_staleness_ms=3000),
+        mirror,
+    )
+    link.b.send(_join_with_ref(7, 47.3769, 8.5417))
+    master.step(10)
+    assert 7 in master.states  # admitted by number, no config entry
+    ref = master.states[7].spec.reference
+    assert ref is not None and abs(ref.lat - 47.3769) < 1e-6  # learned from the JOIN
+    beacons = _beacons(link, FrameReader())
+    assert beacons and 7 in beacons[0].slots  # and it gets a data slot
 
 
 def test_beacon_carries_live_slot_map(tmp_path: Path) -> None:

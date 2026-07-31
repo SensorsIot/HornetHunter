@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from hornethunter_shared.arq import StopAndWaitSender, TxEvent
@@ -22,7 +22,7 @@ from hornethunter_shared.carrier import Carrier
 from hornethunter_shared.frame import Frame, FrameReader, MsgType
 from hornethunter_shared.geo import LatLon
 from hornethunter_shared.messages import BearingReport
-from hornethunter_shared.protocol import AckPayload, BeaconPayload, Reassembler
+from hornethunter_shared.protocol import AckPayload, BeaconPayload, JoinPayload, Reassembler
 from hornethunter_shared.registry import decode_delta
 from hornethunter_shared.schedule import Scheduler, Superframe
 
@@ -165,21 +165,7 @@ class Master:
         self._runtime: dict[int, _StationRuntime] = {}
         self._now_s = 0.0
         for spec in config.stations:
-            self.states[spec.addr] = StationState(spec=spec)
-            self._runtime[spec.addr] = _StationRuntime(
-                sender=StopAndWaitSender(
-                    dest=spec.addr,
-                    src=config.master_addr,
-                    timeout_ms=config.arq_timeout_ms,
-                    max_attempts=config.arq_max_attempts,
-                ),
-                health=HealthEvaluator(
-                    staleness_threshold_s=config.staleness_threshold_s,
-                    rate_window_s=config.rate_window_s,
-                    expected_rate_hz=config.expected_rate_hz,
-                    orange_rate_fraction=config.orange_rate_fraction,
-                ),
-            )
+            self._make_station(spec)
         # TDMA scheduler (§5, §6): live-set + beacon builder. Only drives traffic
         # when tdma_enabled; otherwise it merely tracks who is live.
         self.scheduler = Scheduler(
@@ -196,6 +182,39 @@ class Master:
     def _log(self, event: str, **fields: Any) -> None:
         if self.logger is not None:
             self.logger.event(event, **fields)
+
+    def _make_station(self, spec: StationSpec) -> None:
+        """Create the per-station state and runtime (used by config and self-join)."""
+        self.states[spec.addr] = StationState(spec=spec)
+        self._runtime[spec.addr] = _StationRuntime(
+            sender=StopAndWaitSender(
+                dest=spec.addr,
+                src=self.config.master_addr,
+                timeout_ms=self.config.arq_timeout_ms,
+                max_attempts=self.config.arq_max_attempts,
+            ),
+            health=HealthEvaluator(
+                staleness_threshold_s=self.config.staleness_threshold_s,
+                rate_window_s=self.config.rate_window_s,
+                expected_rate_hz=self.config.expected_rate_hz,
+                orange_rate_fraction=self.config.orange_rate_fraction,
+            ),
+        )
+
+    def _ensure_station(self, addr: int, ref_lat: float | None, ref_lon: float | None) -> None:
+        """Admit a self-announcing station (§5.3): create its state on first JOIN with
+        the reference it announced, or fill in a reference a configured station lacked.
+        Config `[[station]]` is thus optional — a station joins the network by number."""
+        reference = (
+            LatLon(ref_lat, ref_lon) if ref_lat is not None and ref_lon is not None else None
+        )
+        if addr not in self.states:
+            spec = StationSpec(addr=addr, name=f"kraken-{addr:02d}", reference=reference)
+            self._make_station(spec)
+            self._log("station_admitted", station=addr, has_reference=reference is not None)
+        elif reference is not None and self.states[addr].spec.reference is None:
+            self.states[addr].spec = replace(self.states[addr].spec, reference=reference)
+            self._log("station_reference_learned", station=addr)
 
     # -- operator entry points (configuration path) ------------------------
 
@@ -271,11 +290,14 @@ class Master:
         # BEACON is master→station only; IDENT is ignored.
 
     def _on_join(self, frame: Any, now_ms: int) -> None:
-        """A station requests a slot (§5.3). Record it live; the next beacon slots it."""
+        """A station requests a slot (§5.3). Admit it (self-config), record it live;
+        the next beacon slots it."""
         addr = frame.src
-        if addr not in self.states:
-            self._log("unconfigured_frame", src=addr)
-            return
+        try:
+            join = JoinPayload.decode(frame.payload)
+        except Exception:  # noqa: BLE001 - a malformed join must not stall the loop
+            join = JoinPayload()
+        self._ensure_station(addr, join.ref_lat, join.ref_lon)
         self.scheduler.saw(addr, now_ms)
         self._log("station_join", station=addr)
 

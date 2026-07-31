@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 _BEACON = struct.Struct(">HB")  # superframe_seq, config_target
 _JOIN = struct.Struct(">B")  # nonce
+_JOIN_REF = struct.Struct(">ii")  # optional tail: ref_lat_1e7, ref_lon_1e7
 _ACK = struct.Struct(">BBHB")  # acked_seq, config_version, config_crc, status
 _IDENT = struct.Struct(">BH")  # schema_version, capabilities
 _FRAG_HEADER = struct.Struct(">BB")  # frag_index, frag_total
@@ -46,16 +47,33 @@ class BeaconPayload:
 @dataclass(frozen=True)
 class JoinPayload:
     """A station's JOIN request (FSD §5.3). The frame's `src` carries the station
-    number; the nonce lets the master distinguish a fresh join from a retransmit."""
+    number; the nonce lets the master distinguish a fresh join from a retransmit.
+
+    The station also announces its antenna **reference position** (lat/lon), so the
+    master admits a self-announcing station and decodes its decimetre bearing offsets
+    against the right origin — no per-station config entry needed (§5.3, §19.2). The
+    reference is an optional tail (int32 units of 1e-7°); an older nonce-only JOIN
+    still decodes."""
 
     nonce: int = 0
+    ref_lat: float | None = None
+    ref_lon: float | None = None
 
     def encode(self) -> bytes:
-        return _JOIN.pack(self.nonce & 0xFF)
+        out = _JOIN.pack(self.nonce & 0xFF)
+        if self.ref_lat is not None and self.ref_lon is not None:
+            out += _JOIN_REF.pack(round(self.ref_lat * 1e7), round(self.ref_lon * 1e7))
+        return out
 
     @classmethod
     def decode(cls, data: bytes) -> JoinPayload:
-        return cls(*_JOIN.unpack(data[: _JOIN.size])) if data else cls()
+        if not data:
+            return cls()
+        nonce = data[0]
+        if len(data) >= _JOIN.size + _JOIN_REF.size:
+            lat_i, lon_i = _JOIN_REF.unpack(data[_JOIN.size : _JOIN.size + _JOIN_REF.size])
+            return cls(nonce, lat_i / 1e7, lon_i / 1e7)
+        return cls(nonce)
 
 
 @dataclass(frozen=True)

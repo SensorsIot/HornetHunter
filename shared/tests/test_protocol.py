@@ -30,6 +30,21 @@ def test_join_round_trip_and_empty() -> None:
     assert JoinPayload.decode(b"") == JoinPayload(0)  # empty payload tolerated
 
 
+def test_join_carries_reference_for_self_config() -> None:
+    # A station announces its antenna reference so the master admits it (§5.3).
+    j = JoinPayload(nonce=3, ref_lat=47.3769, ref_lon=8.5417)
+    got = JoinPayload.decode(j.encode())
+    assert got.nonce == 3
+    assert got.ref_lat == pytest.approx(47.3769, abs=1e-7)
+    assert got.ref_lon == pytest.approx(8.5417, abs=1e-7)
+
+
+def test_join_reference_is_optional_and_backward_compatible() -> None:
+    # An old nonce-only JOIN (1 byte) still decodes; no reference is a valid state.
+    assert JoinPayload.decode(JoinPayload(nonce=5).encode()) == JoinPayload(5, None, None)
+    assert JoinPayload(nonce=5).encode() == b"\x05"  # nonce-only wire form unchanged
+
+
 def test_ack_round_trip() -> None:
     ack = AckPayload(acked_seq=9, config_version=4, config_crc=0xABCD, status=1)
     assert AckPayload.decode(ack.encode()) == ack
