@@ -89,6 +89,7 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
     path — never needs a serial device or a live KrakenSDR.
     """
     from hornethunter_shared.carrier import SerialCarrier
+    from hornethunter_shared.dtu import maybe_provision_dtu
 
     from .agent import KrakenProxy
     from .doa_source import build_source
@@ -99,7 +100,14 @@ def _run_station(config: dict[str, object]) -> int:  # pragma: no cover - real h
         value = config.get(section, {})
         return value.get(key, default) if isinstance(value, dict) else default
 
-    carrier = SerialCarrier(str(_get("carrier", "serial_url", "/dev/serial0")))
+    carrier_url = str(_get("carrier", "serial_url", "/dev/serial0"))
+    result = maybe_provision_dtu(config, carrier_url, address=int(_get("link", "address", 1)))
+    if result is not None:
+        print(
+            f"hornethunter-kraken: DTU provisioned entered={result.entered} "
+            f"written={result.written or '{}'} mismatches={result.mismatches or '{}'}"
+        )
+    carrier = SerialCarrier(carrier_url)
     source = build_source(
         str(_get("kraken", "backend", "kraken")),
         doa_url=str(_get("kraken", "doa_url", "http://127.0.0.1:8081/DOA_value.html")),

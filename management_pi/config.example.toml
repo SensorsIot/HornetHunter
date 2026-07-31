@@ -14,6 +14,18 @@ promote_probes = 3
 demote_probes = 2
 dwell_s = 30.0
 
+[dtu]
+# Provision the master's LoRa DTU from config at startup (§12), exactly like a
+# station. The master is the broadcast-monitor: ADDR is forced to 0xFFFF (65535) and
+# MODE to 1 (Stream). `channel` and the radio parameters (sf/bw/cr/power, BW an index:
+# 0 = 125 kHz) MUST match every station's [dtu]. Off = leave the stick untouched.
+enabled = false
+channel = 24
+sf = 7
+bw = 0
+cr = 1
+power = 22
+
 # Configuration ARQ (§10.5) — the ONLY acknowledged path. Bearings stream
 # unacknowledged (§5). The 1000 ms timeout fits the measured ~215 ms/frame airtime.
 [arq]

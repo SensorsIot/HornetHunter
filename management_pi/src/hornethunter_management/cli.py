@@ -97,6 +97,7 @@ def run_server(config: dict[str, Any], listen: Any, port: Any) -> int:
     from hornethunter_management.mirror import ConfigMirror
     from hornethunter_management.ui import create_app
     from hornethunter_shared.carrier import SerialCarrier
+    from hornethunter_shared.dtu import maybe_provision_dtu
 
     log_section = config.get("log", {})
     log_path = log_section.get("path", "/var/log/hornethunter/management.jsonl")
@@ -105,8 +106,18 @@ def run_server(config: dict[str, Any], listen: Any, port: Any) -> int:
 
     master_config = MasterConfig.from_toml(config)
     mirror = ConfigMirror(mirror_path)
-    carrier_url = require(config, "carrier", "serial_url")
-    carrier = SerialCarrier(str(carrier_url))
+    carrier_url = str(require(config, "carrier", "serial_url"))
+    # The master DTU is the broadcast-monitor (0xFFFF, §19.2); a [dtu] address
+    # override is honoured but should never be needed.
+    dtu_cfg = config.get("dtu", {})
+    master_addr = int(dtu_cfg.get("address", 0xFFFF)) if isinstance(dtu_cfg, dict) else 0xFFFF
+    result = maybe_provision_dtu(config, carrier_url, address=master_addr)
+    if result is not None:
+        print(
+            f"hornethunter-management: DTU provisioned entered={result.entered} "
+            f"written={result.written or '{}'} mismatches={result.mismatches or '{}'}"
+        )
+    carrier = SerialCarrier(carrier_url)
     master = Master(carrier, master_config, mirror)
 
     def loop() -> None:

@@ -929,6 +929,12 @@ produces no response. Verified on firmware Ver1.2; see
 - **FR-12.7** [Should] Parameters shall be queried individually rather than parsed
   from `AT+AllP?`, whose field order differs between the vendor documentation and
   the shipped firmware.
+- **FR-12.8** [Must] Provisioning shall run automatically at node startup, before the
+  carrier opens the port as a byte pipe, gated on `[dtu] enabled`. `MODE` shall be
+  forced to `1` (Stream) and `ADDR` taken from the node's address — the station's
+  number, or `0xFFFF` for the master (§19.2) — so a swapped or Packet-mode stick
+  self-corrects without manual intervention. When `[dtu]` is absent or disabled the
+  stick is left untouched.
 - **NFR-12.1** [Must] Provisioning shall be idempotent and safe to re-run.
 
 ### 12.3 Parameters applied

@@ -10,6 +10,21 @@ longitude = 8.5417
 # LoRa DTU device node, addressed by stable identity (NFR-15.3), not a ttyACM index.
 serial_url = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXX-if00"
 
+[dtu]
+# Provision the LoRa DTU from config at startup (§12): enter AT mode, write only the
+# parameters that differ, verify by read-back, and always AT+EXIT. Off = assume the
+# stick is already configured and leave it untouched. When enabled, MODE is forced to
+# 1 (Stream, the transparent pipe) and ADDR is taken from [link] address (this
+# station's number) — so a swapped or Packet-mode stick self-corrects. `channel` sets
+# both TX and RX channel; sf/bw/cr/power/netid are optional and applied verbatim (BW
+# is an index: 0 = 125 kHz). These MUST match the Management Pi's [dtu].
+enabled = false
+channel = 24
+sf = 7
+bw = 0
+cr = 1
+power = 22
+
 [kraken]
 # DoA source backend: "kraken" (live DoA feed), "simulator", or "synthetic" (bench).
 backend = "kraken"
