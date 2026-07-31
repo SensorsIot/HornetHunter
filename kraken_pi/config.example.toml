@@ -17,6 +17,10 @@ backend = "kraken"
 # App"); its node server serves it. This is the only local DoA interface — there is
 # no WebSocket feed. Fields: ts_ms, bearing°, conf, power_dBm, freq_Hz, ... (§12.3).
 doa_url = "http://127.0.0.1:8081/DOA_value.html"
+# Config writes go to this settings file atomically with ext_upd_flag (§14) — the
+# vendor-documented path, no en_remote_control needed. Unset → HTTP write fallback.
+# Requires the service to be allowed to write it (relax ProtectHome for the unit).
+settings_path = "/home/krakenrf/krakensdr_doa/krakensdr_doa/_share/settings.json"
 
 [stream]
 # Bearing stream rate cap in Hz (§5, FR-5.3): the station transmits each new DoA
@@ -32,3 +36,21 @@ rssi_append = false
 # Per-station reference for decimetre position offsets (§9.4).
 reference_lat = 47.3769
 reference_lon = 8.5417
+
+[tdma]
+# Master-scheduled TDMA (§5, §6). Off = free-running stream (current behaviour).
+# When enabled, the geometry MUST match the Management Pi's [tdma] exactly.
+enabled = false
+period_ms = 1000
+slot_ms = 125
+guard_ms = 25
+max_slots_per_station = 2
+
+[supervisor]
+# Fully-automatic field supervision (§5.5): watchdog the DoA feed and, on a stall,
+# restart the KrakenSDR services — bounded, logged, escalating (N4/FR-22.2).
+enabled = false
+stall_after_s = 10.0
+backoff_s = 30.0
+max_attempts = 3
+services = ["krakensdr"]

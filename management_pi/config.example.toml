@@ -40,9 +40,20 @@ path = "/var/log/hornethunter/management.jsonl"
 # Per-station configuration mirror, persisted across restarts (FR-7.9).
 path = "/var/lib/hornethunter/mirror.json"
 
-# One [[station]] table per station. `address` is the HH-Link address (§18.2).
-# `reference_lat`/`reference_lon` are the per-station reference for decimetre
-# position offsets (§9.4). Stations stream bearings autonomously — no slots (§5).
+[tdma]
+# Master-scheduled TDMA (§5, §6): the master beacons and assigns slots. Off =
+# free-running stream (current behaviour). Geometry MUST match every station's
+# [tdma]. `staleness_ms` drops a silent station from the slot-map (compaction).
+enabled = false
+period_ms = 1000
+slot_ms = 125
+guard_ms = 25
+max_slots_per_station = 2
+staleness_ms = 3000
+
+# One [[station]] table per station. `address` is the HH-Link address (§18.2) and,
+# under TDMA, the station's slot-ordering number. `reference_lat`/`reference_lon` are
+# the per-station reference for decimetre position offsets (§9.4).
 [[station]]
 address = 1
 name = "kraken-01"
