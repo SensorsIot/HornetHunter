@@ -2,18 +2,32 @@ import pytest
 
 from hornethunter_shared.protocol import (
     AckPayload,
+    BeaconPayload,
     IdentPayload,
-    PollPayload,
+    JoinPayload,
     Reassembler,
     fragment,
 )
 
 
-def test_poll_round_trip_and_expects() -> None:
-    poll = PollPayload(cycle_seq=513, slot_ms=150, expected=0b101)
-    got = PollPayload.decode(poll.encode())
-    assert got == poll
-    assert got.expects(0) and got.expects(2) and not got.expects(1)
+def test_beacon_round_trip_and_slots_for() -> None:
+    beacon = BeaconPayload(seq=513, config_target=2, slots=(1, 2, 3, 1, 2, 3))
+    got = BeaconPayload.decode(beacon.encode())
+    assert got == beacon
+    assert got.slots_for(1) == (0, 3)  # station 1 owns data slots 0 and 3
+    assert got.slots_for(2) == (1, 4)
+    assert got.slots_for(9) == ()  # not in the map
+
+
+def test_beacon_empty_slot_map() -> None:
+    beacon = BeaconPayload(seq=1)
+    got = BeaconPayload.decode(beacon.encode())
+    assert got.seq == 1 and got.config_target == 0 and got.slots == ()
+
+
+def test_join_round_trip_and_empty() -> None:
+    assert JoinPayload.decode(JoinPayload(nonce=7).encode()) == JoinPayload(7)
+    assert JoinPayload.decode(b"") == JoinPayload(0)  # empty payload tolerated
 
 
 def test_ack_round_trip() -> None:

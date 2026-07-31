@@ -31,7 +31,7 @@ _OVERHEAD = _HEADER_LEN + 2  # + CRC16
 class MsgType(IntEnum):
     """HH-Link message types (FSD §10.3). Values occupy the low nibble of VER/TYPE."""
 
-    POLL = 0x1
+    BEACON = 0x1
     BEARING = 0x2
     ACK = 0x3
     PARAM_DELTA = 0x4
@@ -39,6 +39,7 @@ class MsgType(IntEnum):
     PARAM_REQ = 0x6
     PARAM_REPORT = 0x7
     IDENT = 0x8
+    JOIN = 0x9
 
 
 class FrameError(ValueError):

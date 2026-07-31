@@ -46,7 +46,7 @@ def test_split_delivery_reassembles() -> None:
 
 def test_coalesced_frames_all_extracted() -> None:
     reader = FrameReader()
-    a, b = make(MsgType.POLL, b"a"), make(MsgType.BEARING, b"bb")
+    a, b = make(MsgType.BEACON, b"a"), make(MsgType.BEARING, b"bb")
     assert reader.feed(a.encode() + b.encode()) == [a, b]
 
 

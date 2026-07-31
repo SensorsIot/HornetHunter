@@ -10,29 +10,52 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-_POLL = struct.Struct(">HHH")  # cycle_seq, slot_ms, expected bitmap
+_BEACON = struct.Struct(">HB")  # superframe_seq, config_target
+_JOIN = struct.Struct(">B")  # nonce
 _ACK = struct.Struct(">BBHB")  # acked_seq, config_version, config_crc, status
 _IDENT = struct.Struct(">BH")  # schema_version, capabilities
 _FRAG_HEADER = struct.Struct(">BB")  # frag_index, frag_total
 
 
 @dataclass(frozen=True)
-class PollPayload:
-    """A master POLL: which cycle, how wide a reply slot, which stations."""
+class BeaconPayload:
+    """A master beacon (FSD §5.2, §6): its arrival is superframe timing-zero, and
+    it carries the ordered data-slot → station map plus the station (if any) with a
+    pending config exchange this superframe. No absolute clock is needed — timing is
+    relative to when the beacon is heard."""
 
-    cycle_seq: int
-    slot_ms: int
-    expected: int  # bitmap, bit n set → station n+1 expected
+    seq: int  # superframe sequence (u16, wraps) — detects missed beacons
+    config_target: int = 0  # station # with a pending config exchange, or 0 for none
+    slots: tuple[int, ...] = ()  # data-slot index → station number (0 = idle)
 
     def encode(self) -> bytes:
-        return _POLL.pack(self.cycle_seq & 0xFFFF, self.slot_ms & 0xFFFF, self.expected & 0xFFFF)
+        return _BEACON.pack(self.seq & 0xFFFF, self.config_target & 0xFF) + bytes(
+            s & 0xFF for s in self.slots
+        )
 
     @classmethod
-    def decode(cls, data: bytes) -> PollPayload:
-        return cls(*_POLL.unpack(data[: _POLL.size]))
+    def decode(cls, data: bytes) -> BeaconPayload:
+        seq, target = _BEACON.unpack(data[: _BEACON.size])
+        return cls(seq, target, tuple(data[_BEACON.size :]))
 
-    def expects(self, slot_index: int) -> bool:
-        return bool(self.expected & (1 << slot_index))
+    def slots_for(self, station: int) -> tuple[int, ...]:
+        """The data-slot indices this station owns this superframe (§5.2)."""
+        return tuple(i for i, s in enumerate(self.slots) if s == station)
+
+
+@dataclass(frozen=True)
+class JoinPayload:
+    """A station's JOIN request (FSD §5.3). The frame's `src` carries the station
+    number; the nonce lets the master distinguish a fresh join from a retransmit."""
+
+    nonce: int = 0
+
+    def encode(self) -> bytes:
+        return _JOIN.pack(self.nonce & 0xFF)
+
+    @classmethod
+    def decode(cls, data: bytes) -> JoinPayload:
+        return cls(*_JOIN.unpack(data[: _JOIN.size])) if data else cls()
 
 
 @dataclass(frozen=True)
