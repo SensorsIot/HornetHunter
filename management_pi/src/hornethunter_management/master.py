@@ -19,11 +19,12 @@ from typing import Any
 from hornethunter_shared.arq import StopAndWaitSender, TxEvent
 from hornethunter_shared.bearing import decode_bearing
 from hornethunter_shared.carrier import Carrier
-from hornethunter_shared.frame import FrameReader, MsgType
+from hornethunter_shared.frame import Frame, FrameReader, MsgType
 from hornethunter_shared.geo import LatLon
 from hornethunter_shared.messages import BearingReport
-from hornethunter_shared.protocol import AckPayload, Reassembler
+from hornethunter_shared.protocol import AckPayload, BeaconPayload, Reassembler
 from hornethunter_shared.registry import decode_delta
+from hornethunter_shared.schedule import Scheduler, Superframe
 
 from .health import HealthEvaluator, HealthSnapshot
 from .mirror import ConfigMirror
@@ -64,6 +65,14 @@ class MasterConfig:
     dwell_s: float = 30.0
     master_addr: int = BROADCAST_ADDR
     rssi_appended: bool = False
+    # TDMA schedule (§5, §6). Off by default so this code deploys behaving like the
+    # current streamed model; flip [tdma].enabled to activate the beacon + slots.
+    tdma_enabled: bool = False
+    superframe_period_ms: int = 1000
+    superframe_slot_ms: int = 125
+    superframe_guard_ms: int = 25
+    max_slots_per_station: int = 2
+    tdma_staleness_ms: int = 3000
 
     @classmethod
     def from_toml(cls, config: dict[str, Any]) -> MasterConfig:
@@ -83,6 +92,7 @@ class MasterConfig:
         health = config.get("health", {})
         arq = config.get("arq", {})
         carrier = config.get("carrier", {})
+        tdma = config.get("tdma", {})
         return cls(
             stations=tuple(stations),
             staleness_threshold_s=float(health.get("staleness_threshold_s", 1.0)),
@@ -95,6 +105,12 @@ class MasterConfig:
             demote_probes=int(carrier.get("demote_probes", 2)),
             dwell_s=float(carrier.get("dwell_s", 30.0)),
             rssi_appended=bool(config.get("link", {}).get("rssi_append", False)),
+            tdma_enabled=bool(tdma.get("enabled", False)),
+            superframe_period_ms=int(tdma.get("period_ms", 1000)),
+            superframe_slot_ms=int(tdma.get("slot_ms", 125)),
+            superframe_guard_ms=int(tdma.get("guard_ms", 25)),
+            max_slots_per_station=int(tdma.get("max_slots_per_station", 2)),
+            tdma_staleness_ms=int(tdma.get("staleness_ms", 3000)),
         )
 
 
@@ -164,6 +180,18 @@ class Master:
                     orange_rate_fraction=config.orange_rate_fraction,
                 ),
             )
+        # TDMA scheduler (§5, §6): live-set + beacon builder. Only drives traffic
+        # when tdma_enabled; otherwise it merely tracks who is live.
+        self.scheduler = Scheduler(
+            superframe=Superframe(
+                period_ms=config.superframe_period_ms,
+                slot_ms=config.superframe_slot_ms,
+                guard_ms=config.superframe_guard_ms,
+                max_slots_per_station=config.max_slots_per_station,
+            ),
+            staleness_ms=config.tdma_staleness_ms,
+        )
+        self._last_beacon_ms: int | None = None
 
     def _log(self, event: str, **fields: Any) -> None:
         if self.logger is not None:
@@ -221,6 +249,8 @@ class Master:
         self._now_s = now_ms / 1000.0
         self._receive(now_ms)
         self._service_arq(now_ms)
+        if self.config.tdma_enabled:
+            self._maybe_beacon(now_ms)
 
     def _receive(self, now_ms: int) -> None:
         data = self.carrier.recv()
@@ -236,13 +266,50 @@ class Master:
             self._on_ack(frame, now_ms)
         elif frame.msg_type is MsgType.PARAM_REPORT:
             self._on_param_report(frame)
-        # Stray POLL (legacy) and IDENT are ignored by the master.
+        elif frame.msg_type is MsgType.JOIN:
+            self._on_join(frame, now_ms)
+        # BEACON is master→station only; IDENT is ignored.
+
+    def _on_join(self, frame: Any, now_ms: int) -> None:
+        """A station requests a slot (§5.3). Record it live; the next beacon slots it."""
+        addr = frame.src
+        if addr not in self.states:
+            self._log("unconfigured_frame", src=addr)
+            return
+        self.scheduler.saw(addr, now_ms)
+        self._log("station_join", station=addr)
+
+    def _maybe_beacon(self, now_ms: int) -> None:
+        """Broadcast one beacon per superframe: timing-zero + live slot-map (§5.2)."""
+        period = self.scheduler.superframe.period_ms
+        if self._last_beacon_ms is not None and now_ms - self._last_beacon_ms < period:
+            return
+        self._last_beacon_ms = now_ms
+        seq, target, slots = self.scheduler.beacon(now_ms, self._config_pending_target())
+        payload = BeaconPayload(seq=seq, config_target=target, slots=slots).encode()
+        beacon = Frame(
+            MsgType.BEACON,
+            dest=self.config.master_addr,
+            src=self.config.master_addr,
+            seq=0,
+            payload=payload,
+        )
+        self.carrier.send(beacon.encode())
+        self._log("beacon", seq=seq, slots=list(slots), config_target=target)
+
+    def _config_pending_target(self) -> int:
+        """The station (if any) with a config exchange pending this superframe (§5.2)."""
+        for addr, runtime in self._runtime.items():
+            if runtime.desired is not None or runtime.sender.busy or runtime.outbox:
+                return addr
+        return 0
 
     def _on_bearing(self, frame: Any, now_ms: int) -> None:
         addr = frame.src
         if addr not in self.states:
             self._log("unconfigured_frame", src=addr)
             return
+        self.scheduler.saw(addr, now_ms)
         state = self.states[addr]
         try:
             report = decode_bearing(frame.payload, state.spec.name, state.spec.reference)
