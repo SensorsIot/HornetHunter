@@ -110,7 +110,6 @@ runs both.
 - 📋 [Functional Specification (FSD)](docs/hornethunter-fsd.md) — the design contract
 - 🚀 [Deployment & the two-Pi split](docs/deployment.md)
 - 📡 [SX1262 LoRa DTU notes](docs/lora-dtu-sx1262.md)
-- 🛰 [KrakenSDR integration](docs/krakensdr-integration.md)
 
 ## 🔗 Related
 

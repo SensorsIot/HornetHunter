@@ -457,4 +457,4 @@ finally:
 ## Related
 
 - [[hornethunter-fsd]] — how this link is used: framing, ARQ, addressing
-- [[krakensdr-integration]] — the other half of the station's interfaces
+- [[hornethunter-fsd]] §12–§13, §16 — the KrakenSDR side of the station's interfaces

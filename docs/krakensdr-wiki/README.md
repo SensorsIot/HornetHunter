@@ -34,7 +34,7 @@ Pro *Cloud* Mapper — we use `Kraken Pro Local` and send nothing to the cloud),
 ## Constraints extracted from these pages
 
 Load-bearing facts, pulled out so they are not buried. See
-[../krakensdr-integration.md](../krakensdr-integration.md) for the API contract.
+[../hornethunter-fsd.md](../hornethunter-fsd.md) §12–§13 and §16 for the API contract.
 
 **Array geometry** (`04`)
 
