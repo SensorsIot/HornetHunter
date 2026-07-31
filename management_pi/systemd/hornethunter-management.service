@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=hornethunter
+User=pi
 ExecStart=/opt/hornethunter/.venv/bin/hornethunter-management --config /etc/hornethunter/management.toml
 Restart=on-failure
 RestartSec=5
@@ -18,8 +18,9 @@ ProtectHome=true
 PrivateTmp=true
 NoNewPrivileges=true
 ReadOnlyPaths=/etc/hornethunter
-# Track storage for fixes, if the aggregator is configured to persist them.
+# Track storage for the config mirror, and a writable logs dir under ProtectSystem=strict.
 StateDirectory=hornethunter
+LogsDirectory=hornethunter
 
 [Install]
 WantedBy=multi-user.target

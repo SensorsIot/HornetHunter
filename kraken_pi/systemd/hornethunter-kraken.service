@@ -1,12 +1,12 @@
 [Unit]
-Description=HornetHunter Kraken station agent
+Description=HornetHunter KrakenProxy
 Documentation=https://github.com/SensorsIot/HornetHunter
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=hornethunter
+User=krakenrf
 ExecStart=/opt/hornethunter/.venv/bin/hornethunter-kraken --config /etc/hornethunter/kraken.toml
 Restart=on-failure
 RestartSec=5
